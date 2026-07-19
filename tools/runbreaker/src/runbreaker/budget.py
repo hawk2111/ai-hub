@@ -1,8 +1,10 @@
-"""Per-session step and token accounting.
+"""Per-session accounting: steps, tokens, wall-clock start, and recent tool-call
+fingerprints.
 
 Keyed by session id, so each fresh agent run starts at zero. The ledger owns the
-token-read throttle and the resolved-path cache, because both need the same
-exclusive lock as the counter itself.
+token-read throttle, the resolved-path cache, and the recent-call tail (which feeds
+loop detection), because all of them need the same exclusive lock as the counter
+itself.
 
 A `None` reading never erases a number we already had: "we cannot tell right now"
 is weaker evidence than "we measured 2.6M tokens two steps ago".

@@ -1,13 +1,13 @@
 """Provider adapters: the only place that knows a host CLI's dialect.
 
-All three CLIs can be made to speak snake_case — Copilot does so when its hooks
-are registered under PascalCase event names — so parsing is shared. What genuinely
+Every host can be made to speak snake_case — Copilot does so when its hooks are
+registered under PascalCase event names — so parsing is shared. What genuinely
 differs is the *output* contract, and in one case dangerously so: Copilot treats
 any non-zero exit other than 2 as a **deny**, where Claude treats it as a
 non-blocking error. A crash in our code must therefore never reach the exit path.
 
 `deny` is emitted as exit 2 + stderr everywhere, because that is the one mechanism
-all three document identically. Richer JSON bodies are used only where a provider
+they all document identically. Richer JSON bodies are used only where a provider
 needs them.
 """
 

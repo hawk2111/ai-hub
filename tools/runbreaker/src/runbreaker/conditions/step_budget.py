@@ -1,8 +1,9 @@
 """Trip when a run exceeds its tool-call budget.
 
-The only condition that works unconditionally on all three providers: counting
-hook invocations needs nothing from the host CLI. Where tokens are unreadable
-(Copilot), this is the whole safety net.
+Counting hook invocations needs nothing from the host CLI, so this works on every
+provider — including Copilot, where tokens are unreadable. It is the simplest of
+the provider-agnostic backstops (alongside `time_budget`, `repeat_loop` and
+`gate_failures`); reach for it first.
 """
 
 from __future__ import annotations

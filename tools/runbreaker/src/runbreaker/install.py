@@ -459,13 +459,15 @@ def install(config: Config, providers: tuple[str, ...]) -> Result:
         notes.extend(_codex_notes())
     if "copilot" in providers:
         notes.append(
-            "copilot: token usage is not exposed to hooks (github/copilot-cli#2947), "
-            "so only `step_budget` applies there."
+            "copilot: token usage is not exposed to hooks (github/copilot-cli#2947), so the "
+            "token and cost conditions abstain there; the provider-agnostic ones "
+            "(step_budget, time_budget, repeat_loop, gate_failures) still apply."
         )
     notes.append(
         "vscode: Copilot agent mode in VS Code reads .claude/settings.json and "
         ".github/hooks/*.json, so it is covered by the files above — no separate install. "
-        "Its `copilot_*` tool names route to the vscode adapter automatically."
+        "Its tool names (legacy copilot_* and the newer prefix-less create_file/apply_patch) "
+        "route to the vscode adapter automatically."
     )
     notes.append(
         "all: runbreaker ships no shell scripts. Claude gets an exec-form hook (no shell "

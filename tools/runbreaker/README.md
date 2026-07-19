@@ -11,19 +11,56 @@ file edits are denied, the agent drops to read-only, and the run surfaces to a h
 instead of grinding on. Reads, tests and `runbreaker reset` stay available, so
 nothing deadlocks.
 
-```bash
-pip install -e .
-runbreaker install            # wire hooks into the host CLIs, scaffold runbreaker.toml
-runbreaker doctor             # verify the hooks are actually wired up
-runbreaker status             # breaker + budget, as JSON
-runbreaker report             # summarize the audit trail (trips, denials, give-ups)
-runbreaker trip "investigating"
-runbreaker reset              # closing the breaker is always a human decision
-```
+## Quickstart
 
-Install once; run `runbreaker install` in each repository. It generates the hook
-configs and a `.py` shim per (provider, event), and never overwrites a config you
-have already tuned.
+1. **Install the package** (once per machine):
+
+   ```bash
+   cd tools/runbreaker
+   pip install -e .
+   ```
+
+2. **Wire it into a project** (once per repository, run from the repo root):
+
+   ```bash
+   cd /path/to/your/project
+   runbreaker install
+   ```
+
+   This creates a `.runbreaker/` folder holding `runbreaker.toml` (your config) and a
+   `.py` shim per host, and registers hooks in `.claude/settings.json`,
+   `.codex/hooks.json` and `.github/hooks/runbreaker.json`. Existing configs are
+   merged, never overwritten, so it is safe to re-run.
+
+3. **Check it took:**
+
+   ```bash
+   runbreaker doctor
+   ```
+
+   Every line should read `[ok]`. A `[FAIL]` says exactly what to fix.
+
+4. **Run your agent as usual.** With the defaults, runbreaker only steps in when a run
+   makes more than 250 tool calls or the quality gate stays red — otherwise you will
+   not notice it. Adjust the limits in `.runbreaker/runbreaker.toml` (see
+   [Conditions](#conditions)).
+
+5. **When the breaker opens,** the agent drops to read-only and every write is refused
+   with a message pointing here. See what happened, then reopen the door yourself — a
+   passing test never does it for you:
+
+   ```bash
+   runbreaker status     # what tripped, as JSON
+   runbreaker report     # a summary of recent trips and denials
+   runbreaker reset      # close the breaker and clear the run budget
+   ```
+
+**Not sure your limits are right?** Start in **warn mode**: runbreaker records what it
+*would* have tripped on, but blocks nothing. Tune, then switch to enforcing.
+
+```bash
+RUNBREAKER_ENFORCE=warn   # or set [breaker] mode = "warn" in the config
+```
 
 ## How it works
 
