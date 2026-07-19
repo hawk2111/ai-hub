@@ -61,6 +61,7 @@ def _eval_context(event: HookEvent, snapshot: SessionBudget, fails: int) -> Eval
         tokens=snapshot.tokens,
         rate_limit_percent=snapshot.rate_limit_percent,
         elapsed_seconds=snapshot.elapsed_seconds,
+        recent_tools=snapshot.recent_tools,
         consecutive_fails=fails,
     )
 

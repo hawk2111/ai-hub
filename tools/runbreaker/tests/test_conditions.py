@@ -7,6 +7,7 @@ from tests.conftest import make_event
 from runbreaker.conditions import (
     CostBudget,
     GateFailures,
+    LoopGuard,
     RateLimitPressure,
     StepBudget,
     TimeBudget,
@@ -100,6 +101,43 @@ def test_cost_budget_trips_when_estimated_spend_exceeds_the_ceiling():
     assert cond.evaluate(ctx(tokens=600_000)) is None  # $9 < $10
     trip = cond.evaluate(ctx(tokens=1_000_000))
     assert trip is not None and "15.00" in trip.reason
+
+
+# -- repeat_loop ------------------------------------------------------------
+
+
+def test_loop_guard_trips_on_identical_calls_in_a_row():
+    cond = LoopGuard(threshold=3)
+    assert cond.evaluate(ctx(recent_tools=("A", "A"))) is None
+    assert cond.evaluate(ctx(recent_tools=("A", "A", "A"))) is not None
+
+
+def test_loop_guard_ignores_progress():
+    """Distinct calls are progress, not a loop — even many of them."""
+    cond = LoopGuard(threshold=3)
+    assert cond.evaluate(ctx(recent_tools=("A", "B", "C", "D", "E"))) is None
+
+
+def test_loop_guard_trips_on_an_a_b_a_b_cycle():
+    cond = LoopGuard(threshold=3)
+    # Two full A-B cycles is not enough; three (six calls) is.
+    assert cond.evaluate(ctx(recent_tools=("A", "B", "A", "B"))) is None
+    trip = cond.evaluate(ctx(recent_tools=("A", "B", "A", "B", "A", "B")))
+    assert trip is not None and "A-B-A-B" in trip.reason
+
+
+def test_loop_guard_only_looks_at_the_tail():
+    """Earlier progress does not excuse a loop that starts later."""
+    cond = LoopGuard(threshold=2)
+    assert cond.evaluate(ctx(recent_tools=("X", "Y", "Z", "A", "A"))) is not None
+
+
+def test_loop_guard_zero_disables():
+    assert LoopGuard(threshold=0).evaluate(ctx(recent_tools=("A",) * 100)) is None
+
+
+def test_loop_guard_only_runs_pre_tool_use():
+    assert LoopGuard.phases == frozenset({EventType.PRE_TOOL_USE})
 
 
 # -- gate_failures ----------------------------------------------------------

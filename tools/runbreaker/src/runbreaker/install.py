@@ -73,6 +73,13 @@ threshold = 3
 # id = "time_budget"
 # max_minutes = 45           # 0 disables
 
+# Uncomment to catch a stuck agent repeating itself: the same tool call (or an
+# A-B-A-B cycle) fired threshold times. Matches only identical calls, so ordinary
+# edit/test cycles that make progress never trip.
+# [[conditions]]
+# id = "repeat_loop"
+# threshold = 5              # 0 disables
+
 # Uncomment to bound token spend. Abstains when usage cannot be read (e.g. Copilot).
 # [[conditions]]
 # id = "token_budget"

@@ -71,6 +71,10 @@ id = "rate_limit_pressure"  # Codex only; abstains elsewhere
 max_percent = 80
 
 [[conditions]]
+id = "repeat_loop"          # stuck agent: same call (or A-B-A-B) repeated
+threshold = 5               # 0 disables
+
+[[conditions]]
 id = "gate_failures"
 threshold = 3
 
@@ -92,10 +96,10 @@ fail_records_breaker = true
 ```
 
 Env: `RUNBREAKER_MAX_STEPS`, `RUNBREAKER_MAX_TOKENS`, `RUNBREAKER_MAX_MINUTES`,
-`RUNBREAKER_MAX_USD`, `RUNBREAKER_BREAKER_THRESHOLD`, `RUNBREAKER_MAX_RATE_PERCENT`,
-`RUNBREAKER_ENFORCE` (`block` / `warn`), `RUNBREAKER_SKIP_BUDGET`,
-`RUNBREAKER_SKIP_GATE`, `RUNBREAKER_HOME`, `RUNBREAKER_PROJECT_DIR`,
-`RUNBREAKER_GC_DAYS`.
+`RUNBREAKER_MAX_USD`, `RUNBREAKER_MAX_REPEATS`, `RUNBREAKER_BREAKER_THRESHOLD`,
+`RUNBREAKER_MAX_RATE_PERCENT`, `RUNBREAKER_ENFORCE` (`block` / `warn`),
+`RUNBREAKER_SKIP_BUDGET`, `RUNBREAKER_SKIP_GATE`, `RUNBREAKER_HOME`,
+`RUNBREAKER_PROJECT_DIR`, `RUNBREAKER_GC_DAYS`.
 
 ## Design decisions worth knowing
 

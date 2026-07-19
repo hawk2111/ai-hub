@@ -26,6 +26,10 @@ NAME = "budget"
 DEFAULT_GC_DAYS = 7
 DEFAULT_MAX_SESSIONS = 50
 
+#: How many recent tool-call fingerprints to keep per session for loop detection.
+#: Bounded so the ledger stays small; large enough for a generous repeat threshold.
+RECENT_MAX = 64
+
 
 def _empty() -> dict[str, Any]:
     return {"sessions": {}}
@@ -38,6 +42,7 @@ def _new_session() -> dict[str, Any]:
         "rate_limit_percent": None,
         "started_at": time.time(),
         "cache": {},
+        "recent": [],
     }
 
 
@@ -47,17 +52,21 @@ class SessionBudget:
     tokens: int | None = None
     rate_limit_percent: float | None = None
     elapsed_seconds: float = 0.0
+    #: Recent tool-call fingerprints, oldest first. Feeds the loop guard.
+    recent_tools: tuple[str, ...] = ()
 
 
 def _snapshot(session: dict[str, Any]) -> SessionBudget:
     # Reuse the same numeric guards the token sources use: both reject bool, so a
     # JSON `true` in a persisted field degrades to "unknown" instead of 1.
     started = as_float(session.get("started_at")) or 0.0
+    recent = session.get("recent")
     return SessionBudget(
         steps=int(session.get("steps", 0)),
         tokens=as_int(session.get("tokens")),
         rate_limit_percent=as_float(session.get("rate_limit_percent")),
         elapsed_seconds=max(0.0, time.time() - started) if started else 0.0,
+        recent_tools=tuple(str(f) for f in recent) if isinstance(recent, list) else (),
     )
 
 
@@ -85,6 +94,11 @@ class Budget:
             sessions: dict[str, Any] = draft.data.setdefault("sessions", {})
             session = sessions.setdefault(event.session_id, _new_session())
             session["steps"] = int(session.get("steps", 0)) + 1
+
+            if event.tool_name:
+                recent = session.setdefault("recent", [])
+                recent.append(event.fingerprint())
+                del recent[:-RECENT_MAX]  # keep only the tail
 
             if recompute_every > 0 and (session["steps"] - 1) % recompute_every == 0:
                 self._refresh(session, event, source, audit_path)

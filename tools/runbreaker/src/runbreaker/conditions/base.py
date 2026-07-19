@@ -34,6 +34,8 @@ class EvalContext:
     rate_limit_percent: float | None
     consecutive_fails: int
     elapsed_seconds: float = 0.0
+    #: Recent tool-call fingerprints, oldest first. Feeds the loop guard.
+    recent_tools: tuple[str, ...] = ()
 
 
 class Condition(ABC):

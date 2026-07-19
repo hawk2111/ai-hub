@@ -165,6 +165,7 @@ def _apply_env(conditions: list[dict[str, Any]]) -> None:
         ("RUNBREAKER_MAX_TOKENS", "token_budget", "max_tokens", _env_int),
         ("RUNBREAKER_MAX_MINUTES", "time_budget", "max_minutes", _env_float),
         ("RUNBREAKER_MAX_USD", "cost_budget", "max_usd", _env_float),
+        ("RUNBREAKER_MAX_REPEATS", "repeat_loop", "threshold", _env_int),
         ("RUNBREAKER_BREAKER_THRESHOLD", "gate_failures", "threshold", _env_int),
         ("RUNBREAKER_MAX_RATE_PERCENT", "rate_limit_pressure", "max_percent", _env_float),
     )

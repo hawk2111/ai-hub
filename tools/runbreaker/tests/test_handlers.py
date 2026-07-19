@@ -94,6 +94,25 @@ def test_no_configured_checks_means_the_stop_gate_is_a_noop(project, monkeypatch
     assert code == 0
 
 
+def test_a_repeating_loop_opens_the_breaker(project, state_dir, monkeypatch, capsys):
+    """End-to-end: the same write, over and over, trips the loop guard."""
+    write_config(
+        project,
+        """
+        [[conditions]]
+        id = "repeat_loop"
+        threshold = 3
+        """,
+    )
+    # pre_tool_payload("claude") is the same Write to a.py every call.
+    codes = [
+        run_hook(pre_tool_payload("claude"), "claude", "pre_tool_use", monkeypatch, capsys)[0]
+        for _ in range(4)
+    ]
+    assert 2 in codes, "an identical call repeated past the threshold must be denied"
+    assert Breaker(Store(state_dir)).status().is_open
+
+
 def test_a_red_gate_blocks_the_stop_and_hands_back_the_failure(project, monkeypatch, capsys):
     write_config(
         project,

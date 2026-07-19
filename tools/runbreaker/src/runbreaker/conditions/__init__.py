@@ -34,6 +34,7 @@ from runbreaker.conditions.base import (
 # Importing these populates REGISTRY via @register.
 from runbreaker.conditions.cost_budget import CostBudget
 from runbreaker.conditions.gate_failures import GateFailures
+from runbreaker.conditions.loop import LoopGuard
 from runbreaker.conditions.rate_limit_pressure import RateLimitPressure
 from runbreaker.conditions.step_budget import StepBudget
 from runbreaker.conditions.time_budget import TimeBudget
@@ -45,6 +46,7 @@ __all__ = [
     "CostBudget",
     "EvalContext",
     "GateFailures",
+    "LoopGuard",
     "RateLimitPressure",
     "StepBudget",
     "TimeBudget",
