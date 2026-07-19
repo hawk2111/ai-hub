@@ -8,7 +8,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from tests.conftest import make_event, run_hook
+from tests.conftest import PYEXE, make_event, run_hook
 
 from runbreaker import config, gate, install
 from runbreaker.breaker import Breaker
@@ -89,7 +89,7 @@ def test_a_real_failure_alongside_a_config_error_still_blocks(project, monkeypat
 
         [[gate.checks]]
         name = "failing"
-        command = ["{sys.executable}", "-c", "import sys; sys.exit(1)"]
+        command = ["{PYEXE}", "-c", "import sys; sys.exit(1)"]
         """,
     )
     code, _, err = run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
@@ -221,7 +221,7 @@ def test_the_gate_output_survives_into_the_audit_when_the_breaker_trips(
 
         [[gate.checks]]
         name = "failing"
-        command = ["{sys.executable}", "-c", "import sys; print('the real reason'); sys.exit(1)"]
+        command = ["{PYEXE}", "-c", "import sys; print('the real reason'); sys.exit(1)"]
         """,
     )
     code, _, _ = run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)

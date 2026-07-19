@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import sys
 import textwrap
 
 import pytest
-from tests.conftest import pre_tool_payload, run_hook
+from tests.conftest import PYEXE, pre_tool_payload, run_hook
 
 from runbreaker.breaker import Breaker
 from runbreaker.providers import (
@@ -101,7 +100,7 @@ def test_a_red_gate_blocks_the_stop_and_hands_back_the_failure(project, monkeypa
         f"""
         [[gate.checks]]
         name = "failing"
-        command = ["{sys.executable}", "-c", "import sys; print('boom'); sys.exit(1)"]
+        command = ["{PYEXE}", "-c", "import sys; print('boom'); sys.exit(1)"]
         """,
     )
     code, _, err = run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
@@ -116,7 +115,7 @@ def test_a_green_gate_lets_the_agent_finish(project, monkeypatch, capsys):
         f"""
         [[gate.checks]]
         name = "passing"
-        command = ["{sys.executable}", "-c", "pass"]
+        command = ["{PYEXE}", "-c", "pass"]
         """,
     )
     code, _, _ = run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
@@ -133,7 +132,7 @@ def test_consecutive_red_gates_open_the_breaker(project, state_dir, monkeypatch,
 
         [[gate.checks]]
         name = "failing"
-        command = ["{sys.executable}", "-c", "import sys; sys.exit(1)"]
+        command = ["{PYEXE}", "-c", "import sys; sys.exit(1)"]
         """,
     )
     assert run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)[0] == 2
@@ -194,7 +193,7 @@ def test_the_stop_gate_gives_up_rather_than_looping_forever(project, monkeypatch
 
         [[gate.checks]]
         name = "failing"
-        command = ["{sys.executable}", "-c", "import sys; sys.exit(1)"]
+        command = ["{PYEXE}", "-c", "import sys; sys.exit(1)"]
         """,
     )
     codes = [run_hook(STOP_PAYLOAD, "codex", "stop", monkeypatch, capsys)[0] for _ in range(3)]

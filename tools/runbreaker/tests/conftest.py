@@ -10,6 +10,12 @@ import pytest
 from runbreaker import hook
 from runbreaker.events import EventType, HookEvent
 
+#: A TOML-safe interpreter path. A Windows `sys.executable` is full of backslashes,
+#: which a TOML double-quoted string reads as escape sequences and then rejects —
+#: silently emptying the config and disabling the gate. Forward slashes are valid
+#: in Windows paths and need no escaping, so tests embed this in generated TOML.
+PYEXE = sys.executable.replace("\\", "/")
+
 RUNBREAKER_VARS = (
     "RUNBREAKER_HOME",
     "RUNBREAKER_PROJECT_DIR",
