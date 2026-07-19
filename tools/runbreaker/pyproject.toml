@@ -46,6 +46,10 @@ warn_unreachable = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Put the package root on sys.path so `from tests.conftest import ...` resolves
+# under the bare `pytest` console script, not only `python -m pytest` (which adds
+# the CWD itself). CI runs `pytest`, so without this the tests fail to import.
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["runbreaker"]
