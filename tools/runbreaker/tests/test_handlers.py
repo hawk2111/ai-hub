@@ -250,9 +250,28 @@ def test_vscode_write_tools_are_recognised_through_a_claude_shim(
     assert "circuit breaker is OPEN" in err
 
 
+def test_prefix_less_vscode_write_is_denied_through_a_claude_shim(
+    project, state_dir, monkeypatch, capsys
+):
+    """The rename case, end to end: create_file (no copilot_ prefix) via the Claude
+    shim must still be gated, not silently allowed through as a non-write."""
+    Breaker(Store(state_dir)).trip("test")
+    payload = {
+        "session_id": "s1",
+        "cwd": "/tmp",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "create_file",
+        "tool_input": {"filePath": "a.py"},
+    }
+    code, _, err = run_hook(payload, "claude", "pre_tool_use", monkeypatch, capsys)
+    assert code == 2, "a renamed VS Code write must not slip past the open breaker"
+    assert "circuit breaker is OPEN" in err
+
+
 @pytest.mark.parametrize(
     ("tool", "expected"),
     [
+        # Legacy copilot_* contribution names.
         ("copilot_createFile", True),
         ("copilot_applyPatch", True),
         ("copilot_replaceString", True),
@@ -260,9 +279,17 @@ def test_vscode_write_tools_are_recognised_through_a_claude_shim(
         ("copilot_editNotebook", True),
         ("copilot_readFile", False),
         ("copilot_findFiles", False),
+        # Current prefix-less ToolName-enum names (the copilot_* rename).
+        ("create_file", True),
+        ("apply_patch", True),
+        ("replace_string_in_file", True),
+        ("insert_edit_into_file", True),
+        ("edit_notebook_file", True),
+        ("read_file", False),
         # Escape hatches, gated nowhere — same policy as Bash elsewhere.
         ("copilot_runVscodeCommand", False),
         ("copilot_runNotebookCell", False),
+        ("run_notebook_cell", False),
     ],
 )
 def test_vscode_write_tool_vocabulary(tool, expected):
@@ -280,6 +307,20 @@ def test_codex_specific_fields_identify_codex():
 
 def test_snake_case_without_hints_falls_back_to_claude():
     assert isinstance(detect({"tool_name": "Write"}), ClaudeAdapter)
+
+
+@pytest.mark.parametrize("provider", ["claude", "copilot"])
+@pytest.mark.parametrize("tool", ["create_file", "apply_patch", "replace_string_in_file"])
+def test_prefix_less_vscode_tool_overrides_the_shim_provider(provider, tool):
+    """After the copilot_* rename, a VS Code tool reaching us through a Claude or
+    Copilot shim must still route to the VS Code adapter — or its writes slip past."""
+    payload = {"session_id": "s", "cwd": "/tmp", "tool_name": tool}
+    assert isinstance(detect(payload, provider), VSCodeAdapter)
+
+
+def test_codex_apply_patch_is_not_mistaken_for_vscode():
+    """apply_patch is Codex's tool too; its baked provider keeps it correctly routed."""
+    assert isinstance(detect({"tool_name": "apply_patch"}, "codex"), CodexAdapter)
 
 
 @pytest.mark.parametrize(

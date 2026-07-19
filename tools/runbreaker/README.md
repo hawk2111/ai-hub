@@ -146,7 +146,7 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
 | | Claude Code | Codex CLI | Copilot CLI | Copilot in VS Code |
 |---|---|---|---|---|
 | config | `.claude/settings.json` | `.codex/hooks.json` | `.github/hooks/runbreaker.json` | reuses the other two |
-| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` | `create` `edit` | `copilot_createFile`, `copilot_applyPatch`, `copilot_replaceString`, … |
+| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` | `create` `edit` | `create_file`, `apply_patch`, `replace_string_in_file`, … (and legacy `copilot_*`) |
 | step budget | yes | yes | yes | yes |
 | token budget | yes | yes | **no** | no |
 | rate-limit pressure | no | yes | no | no |
