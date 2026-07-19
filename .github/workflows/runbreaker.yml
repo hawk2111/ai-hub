@@ -1,0 +1,72 @@
+name: runbreaker
+
+# Per-tool workflow: only runs when runbreaker (or this file) changes, so one tool's
+# churn never spends CI on the others. Each tool in tools/ gets its own workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/runbreaker/**"
+      - ".github/workflows/runbreaker.yml"
+  pull_request:
+    paths:
+      - "tools/runbreaker/**"
+      - ".github/workflows/runbreaker.yml"
+
+defaults:
+  run:
+    working-directory: tools/runbreaker
+
+jobs:
+  test:
+    # Windows is not incidental here: the locking backend, the interpreter path and
+    # the shell quoting all differ, and none of it is exercised on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest
+
+  coverage:
+    # Linux-only: the fail_under floor would wobble across platforms because the
+    # file-locking backend differs (fcntl vs msvcrt). The matrix `test` job above
+    # is what proves both platforms pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - run: pytest --cov=runbreaker --cov-report=term-missing
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests scripts
+      - run: mypy src
+      - run: mypy --platform win32 src
+
+  no-runtime-deps:
+    # The hooks are spawned as a bare `python3` with no venv active. Anything
+    # reachable from a hook process must import from the standard library alone.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/check_stdlib_only.py

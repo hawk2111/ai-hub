@@ -1,11 +1,13 @@
-.agentguard/state/
-.agentguard/shims/
+.runbreaker/state/
+.runbreaker/shims/
 
 __pycache__/
 *.py[cod]
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.coverage
+htmlcov/
 *.egg-info/
 build/
 dist/
