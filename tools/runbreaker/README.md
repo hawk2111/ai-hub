@@ -188,7 +188,8 @@ Env: `RUNBREAKER_MAX_STEPS`, `RUNBREAKER_MAX_TOKENS`, `RUNBREAKER_MAX_MINUTES`,
 `RUNBREAKER_MAX_USD`, `RUNBREAKER_MAX_REPEATS`, `RUNBREAKER_BREAKER_THRESHOLD`,
 `RUNBREAKER_MAX_RATE_PERCENT`, `RUNBREAKER_ENFORCE` (`block` / `warn`),
 `RUNBREAKER_SKIP_BUDGET`, `RUNBREAKER_SKIP_GATE`, `RUNBREAKER_HOME`,
-`RUNBREAKER_PROJECT_DIR`, `RUNBREAKER_GC_DAYS`.
+`RUNBREAKER_PROJECT_DIR`, `RUNBREAKER_GC_DAYS`, `RUNBREAKER_VSCODE_USAGE_LOG`
+(see [Provider notes](#provider-notes)).
 
 ## Design decisions worth knowing
 
@@ -268,18 +269,32 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
 | condition | works? | why |
 |---|---|---|
 | `step_budget` `time_budget` `repeat_loop` `gate_failures` | **yes** | provider-agnostic — need nothing from the host |
-| `token_budget` `cost_budget` | **wired, usually abstains** | see below |
+| `token_budget` `cost_budget` | **opt-in** | need `RUNBREAKER_VSCODE_USAGE_LOG` — see below |
 | `rate_limit_pressure` | **no** | VS Code reports no rate-limit percentage to hooks |
 
 The token and cost conditions are hooked up (`token_source = "auto"` resolves to the
-VS Code reader) and start working the moment a run's usage is readable — but today it
-usually is not. VS Code hands hooks a `transcript_path` only on **Stop**, its format is
-documented as "not a stable hook API", and the one place VS Code records real usage
-(`promptTokens` / `completionTokens`) is the opt-in agent debug log
+VS Code reader) but usually **abstain**, because VS Code hands hooks a `transcript_path`
+only on **Stop**, its format is "not a stable hook API", and the one place it records
+real usage (`promptTokens` / `completionTokens`) is the opt-in agent session log
 (`github.copilot.chat.agentDebugLog.fileLogging.enabled`), whose path is never given to
-a hook. So these conditions **abstain** (never trip on a guessed number) rather than
-enforce. If the transcript ever carries usage, they work with no config change; until
-then, guard VS Code with the four provider-agnostic conditions above.
+a hook.
+
+**To turn token/cost budgets on in VS Code:** enable that session logging, then point
+runbreaker at the log with `RUNBREAKER_VSCODE_USAGE_LOG`. It accepts a file, a
+directory, or a glob — a directory/glob resolves to the **most recently modified** match
+(the active session), e.g.:
+
+```bash
+export RUNBREAKER_VSCODE_USAGE_LOG="$HOME/.config/Code/User/**/chatSessions/*.jsonl"
+```
+
+The reader counts usage the way VS Code does: `promptTokens` is the whole growing
+context each turn, so it is **maxed** (current context window), while `completionTokens`
+is **summed** (total output) — the total is `max(prompt) + sum(completion)`, not a naive
+sum that would count the context over and over. Cost is therefore approximate (it does
+not model cached vs. new input). Unreadable or unrecognized input still abstains — never
+a guessed number. Without the knob, guard VS Code with the four provider-agnostic
+conditions above.
 
 ## No shell scripts
 

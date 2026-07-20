@@ -38,6 +38,11 @@ Cache = MutableMapping[str, Any]
 #: Pull the token count out of one record, or None if it carries none.
 Extract = Callable[[dict[str, Any]], int | None]
 
+#: Fold one record into a small integer-valued state dict (persisted in the cache).
+Fold = Callable[[dict[str, int], dict[str, Any]], None]
+#: Turn the accumulated state into a total, or None when nothing usable was seen.
+Finalize = Callable[[dict[str, int]], "int | None"]
+
 
 @dataclass(frozen=True)
 class ProviderUsage:
@@ -137,6 +142,57 @@ def incremental_sum(path: Path, cache: Cache, namespace: str, extract: Extract) 
         cache[off_key], cache[total_key], cache[seen_key] = offset, total, seen
 
     return total if seen else None
+
+
+def incremental_fold(
+    path: Path, cache: Cache, namespace: str, fold: Fold, finalize: Finalize
+) -> int | None:
+    """Like `incremental_sum`, but folds records into an arbitrary integer-state dict
+    instead of summing one value — for readers that need max, not sum (VS Code reports
+    `promptTokens` as the whole growing context each turn, so summing overcounts wildly).
+
+    Same append-only resume (a byte offset + running state cached across invocations),
+    same rotation reset and oversized-tail guard. Also resets when the resolved path
+    changes, so a "newest match" that rolls to a new session file starts clean rather
+    than resuming an offset from a different file.
+    """
+    off_key, state_key, path_key = (f"{namespace}_{s}" for s in ("offset", "fold", "path"))
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+
+    if cache.get(path_key) != str(path):  # newest-match rolled to a different file
+        cache[path_key], cache[off_key], cache[state_key] = str(path), 0, {}
+
+    offset = as_int(cache.get(off_key)) or 0
+    raw_state = cache.get(state_key)
+    state: dict[str, int] = raw_state if isinstance(raw_state, dict) else {}
+
+    if size < offset:  # truncated/rotated underneath us
+        offset, state = 0, {}
+    if size - offset > MAX_DELTA_BYTES:
+        return None
+
+    if size > offset:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(offset)
+                blob = fh.read(size - offset)
+        except OSError:
+            return None
+        consumed = blob.rfind(b"\n") + 1
+        for raw in blob[:consumed].splitlines():
+            try:
+                record = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                fold(state, record)
+        offset += consumed
+        cache[off_key], cache[state_key] = offset, state
+
+    return finalize(state)
 
 
 def iter_tail_json_lines(path: Path, max_bytes: int = 1024 * 1024) -> Iterator[dict[str, Any]]:

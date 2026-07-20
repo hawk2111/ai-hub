@@ -11,8 +11,8 @@ returns `None` far more often than not, and Copilot is in practice guarded by th
 provider-agnostic conditions (`step_budget`, `time_budget`, `repeat_loop`,
 `gate_failures`). That is a documented limitation, not an oversight.
 
-The same reader backs Copilot in VS Code (`tokens/vscode.py`), which faces the
-same wall.
+Copilot in VS Code hits the same wall but accounts for usage differently, so it has
+its own reader (`tokens/vscode.py`).
 """
 
 from __future__ import annotations
