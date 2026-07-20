@@ -335,6 +335,26 @@ not model cached vs. new input). Unreadable or unrecognized input still abstains
 a guessed number. Without the knob, guard VS Code with the four provider-agnostic
 conditions above.
 
+### vs VS Code's built-in `Chat › Agent: Max Requests`
+
+VS Code already caps the number of model requests **per turn** and prompts you to
+confirm when the cap is hit. It overlaps with `step_budget`, but is narrower on three
+axes, so the two are complementary rather than redundant:
+
+- **Per turn, not per run.** The cap resets every turn, so an agent that makes
+  `maxRequests − 1` requests each turn, turn after turn, never trips it — while burning
+  unbounded time, tokens and cost. runbreaker's step / time / token / cost budgets
+  accumulate across the whole run.
+- **One dimension.** It counts requests only; runbreaker also guards wall-clock time,
+  tokens, dollars, stuck loops and a red quality gate.
+- **Confirm vs. stop.** It asks a human to click "continue" — fine when you are watching,
+  a silent pause when you are not. runbreaker opens a breaker that stays open until an
+  explicit `runbreaker reset`, and is cross-provider.
+
+If you only work in VS Code and only want to bound a single turn, `Max Requests` is
+built in and enough — reach for runbreaker for cumulative run budgets, loop/gate
+guarding, or the same limits across Claude Code and Codex.
+
 ## No shell scripts
 
 Everything runbreaker runs is Python. It ships no `.sh`, no `.ps1`, and no shell
