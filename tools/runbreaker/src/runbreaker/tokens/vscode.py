@@ -73,12 +73,6 @@ def _fold(state: dict[str, int], record: dict[str, Any]) -> None:
         state["completion_sum"] = state.get("completion_sum", 0) + sum(completions)
 
 
-def _finalize(state: dict[str, int]) -> int | None:
-    if "prompt_max" not in state and "completion_sum" not in state:
-        return None
-    return state.get("prompt_max", 0) + state.get("completion_sum", 0)
-
-
 def _match(pattern: str, session_id: str) -> Path | None:
     """Resolve the knob to one file.
 
@@ -126,4 +120,10 @@ class VSCodeTokenSource(TokenSource):
         path = _resolve_path(event, cache)
         if path is None:
             return UNKNOWN
-        return ProviderUsage(total_tokens=incremental_fold(path, cache, self.id, _fold, _finalize))
+        state = incremental_fold(path, cache, self.id, _fold)
+        if not state:  # unreadable, or nothing recognized yet
+            return UNKNOWN
+        # promptTokens is the current context (peak); completionTokens is total output.
+        # Cost stays blended-on-total: VS Code bills in credits, not per-model tokens.
+        total = state.get("prompt_max", 0) + state.get("completion_sum", 0)
+        return ProviderUsage(total_tokens=total)

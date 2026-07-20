@@ -68,11 +68,32 @@ class BudgetConfig:
 
 
 @dataclass(frozen=True)
+class ModelRate:
+    input: float
+    output: float
+
+
+@dataclass(frozen=True)
+class CostConfig:
+    """Prices for `cost_budget`, in USD per million tokens. Per-model rates are exact
+    for token-billed providers (Claude, Codex); `default_per_mtok` is the blended
+    fallback for models without a rate and for sources that report only a total."""
+
+    default_per_mtok: float = 0.0
+    models: dict[str, ModelRate] = field(default_factory=dict)
+
+    @property
+    def enabled(self) -> bool:
+        return self.default_per_mtok > 0 or bool(self.models)
+
+
+@dataclass(frozen=True)
 class Config:
     home: Path
     project: Path
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     gate: GateConfig = field(default_factory=GateConfig)
+    cost: CostConfig = field(default_factory=CostConfig)
     conditions: tuple[dict[str, Any], ...] = DEFAULT_CONDITIONS
     skip_budget: bool = False
     skip_gate: bool = False
@@ -200,6 +221,31 @@ def _parse_gate(raw: dict[str, Any]) -> GateConfig:
     )
 
 
+def _parse_cost(raw: dict[str, Any]) -> CostConfig:
+    models: dict[str, ModelRate] = {}
+    for entry in raw.get("model", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        inp, out = entry.get("input"), entry.get("output")
+        if (
+            not model_id
+            or not isinstance(inp, int | float)
+            or not isinstance(out, int | float)
+            or isinstance(inp, bool)
+            or isinstance(out, bool)
+        ):
+            continue
+        models[str(model_id)] = ModelRate(float(inp), float(out))
+    default = raw.get("default_per_mtok", 0)
+    return CostConfig(
+        default_per_mtok=float(default)
+        if isinstance(default, int | float) and not isinstance(default, bool)
+        else 0.0,
+        models=models,
+    )
+
+
 def load() -> Config:
     project = project_dir()
     home = home_dir(project)
@@ -224,6 +270,7 @@ def load() -> Config:
     )
 
     gate_raw = data.get("gate", {}) if isinstance(data.get("gate"), dict) else {}
+    cost_raw = data.get("cost", {}) if isinstance(data.get("cost"), dict) else {}
 
     breaker_raw = data.get("breaker", {}) if isinstance(data.get("breaker"), dict) else {}
     mode = os.environ.get("RUNBREAKER_ENFORCE") or str(breaker_raw.get("mode", "block"))
@@ -233,6 +280,7 @@ def load() -> Config:
         project=project,
         budget=budget,
         gate=_parse_gate(gate_raw),
+        cost=_parse_cost(cost_raw),
         conditions=tuple(conditions),
         skip_budget=os.environ.get("RUNBREAKER_SKIP_BUDGET") == "1",
         skip_gate=os.environ.get("RUNBREAKER_SKIP_GATE") == "1",

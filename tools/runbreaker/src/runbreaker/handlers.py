@@ -62,6 +62,7 @@ def _eval_context(event: HookEvent, snapshot: SessionBudget, fails: int) -> Eval
         rate_limit_percent=snapshot.rate_limit_percent,
         elapsed_seconds=snapshot.elapsed_seconds,
         recent_tools=snapshot.recent_tools,
+        cost_usd=snapshot.cost_usd,
         consecutive_fails=fails,
     )
 
@@ -82,6 +83,7 @@ def pre_tool_use(event: HookEvent, rt: Runtime) -> Decision:
         gc_days=rt.config.gc_days,
         max_sessions=rt.config.max_sessions,
         audit_path=rt.config.audit_path,
+        cost=rt.config.cost,
     )
 
     trip = evaluate(rt.conditions, _eval_context(event, snapshot, status.fails))
@@ -200,7 +202,7 @@ def _refresh_budget(event: HookEvent, rt: Runtime) -> SessionBudget:
     if rt.config.skip_budget:
         return rt.budget.status(event.session_id)
     source = get_source(rt.config.budget.token_source, event.provider)
-    return rt.budget.refresh(event, source, rt.config.audit_path)
+    return rt.budget.refresh(event, source, rt.config.audit_path, rt.config.cost)
 
 
 def _trip_or_warn(

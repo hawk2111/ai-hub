@@ -18,12 +18,35 @@ from pathlib import Path
 from typing import Any
 
 from runbreaker import audit
+from runbreaker.config import CostConfig
 from runbreaker.events import HookEvent
 from runbreaker.state import Store
 from runbreaker.tokens import TokenSource
-from runbreaker.tokens.base import as_float, as_int
+from runbreaker.tokens.base import ProviderUsage, as_float, as_int
 
 NAME = "budget"
+
+
+def compute_cost(usage: ProviderUsage, cost: CostConfig) -> float | None:
+    """Dollar cost of a usage reading, or None when cost is not configured / unknown.
+
+    Per-model input and output rates are exact where the source split usage by model
+    (Claude, Codex); a model without a configured rate — and any source that reports
+    only a grand total — falls back to the blended `default_per_mtok`.
+    """
+    if not cost.enabled:
+        return None
+    if usage.by_model:
+        total = 0.0
+        for m in usage.by_model:
+            rate = cost.models.get(m.model)
+            r_in = rate.input if rate else cost.default_per_mtok
+            r_out = rate.output if rate else cost.default_per_mtok
+            total += m.input_tokens / 1_000_000 * r_in + m.output_tokens / 1_000_000 * r_out
+        return total
+    if usage.total_tokens is not None and cost.default_per_mtok > 0:
+        return usage.total_tokens / 1_000_000 * cost.default_per_mtok
+    return None
 
 DEFAULT_GC_DAYS = 7
 DEFAULT_MAX_SESSIONS = 50
@@ -56,6 +79,8 @@ class SessionBudget:
     elapsed_seconds: float = 0.0
     #: Recent tool-call fingerprints, oldest first. Feeds the loop guard.
     recent_tools: tuple[str, ...] = ()
+    #: Estimated USD spend since the last reset. Feeds cost_budget.
+    cost_usd: float | None = None
 
 
 def _snapshot(session: dict[str, Any]) -> SessionBudget:
@@ -63,17 +88,20 @@ def _snapshot(session: dict[str, Any]) -> SessionBudget:
     # JSON `true` in a persisted field degrades to "unknown" instead of 1.
     started = as_float(session.get("started_at")) or 0.0
     recent = session.get("recent")
-    # Tokens are reported relative to the last reset. The provider's transcript is
-    # cumulative and a reset cannot rewind it, so we subtract the reading captured at
+    # Tokens and cost are reported relative to the last reset. The provider's transcript
+    # is cumulative and a reset cannot rewind it, so we subtract the reading captured at
     # reset time — otherwise the budget would re-trip on the first call after a reset.
     absolute = as_int(session.get("tokens"))
     baseline = as_int(session.get("tokens_baseline")) or 0
+    cost = as_float(session.get("cost"))
+    cost_baseline = as_float(session.get("cost_baseline")) or 0.0
     return SessionBudget(
         steps=int(session.get("steps", 0)),
         tokens=max(0, absolute - baseline) if absolute is not None else None,
         rate_limit_percent=as_float(session.get("rate_limit_percent")),
         elapsed_seconds=max(0.0, time.time() - started) if started else 0.0,
         recent_tools=tuple(str(f) for f in recent) if isinstance(recent, list) else (),
+        cost_usd=max(0.0, cost - cost_baseline) if cost is not None else None,
     )
 
 
@@ -90,6 +118,7 @@ class Budget:
         gc_days: int = DEFAULT_GC_DAYS,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         audit_path: Path | None = None,
+        cost: CostConfig | None = None,
     ) -> SessionBudget:
         """Count one tool call, refreshing token usage every Nth step."""
         with self._store.update(NAME, _empty) as draft:
@@ -108,14 +137,18 @@ class Budget:
                 del recent[:-RECENT_MAX]  # keep only the tail
 
             if recompute_every > 0 and (session["steps"] - 1) % recompute_every == 0:
-                self._refresh(session, event, source, audit_path)
+                self._refresh(session, event, source, audit_path, cost)
 
             session["updated_at"] = time.time()
             _collect(sessions, gc_days=gc_days, max_sessions=max_sessions)
             return _snapshot(session)
 
     def refresh(
-        self, event: HookEvent, source: TokenSource, audit_path: Path | None = None
+        self,
+        event: HookEvent,
+        source: TokenSource,
+        audit_path: Path | None = None,
+        cost: CostConfig | None = None,
     ) -> SessionBudget:
         """Re-read token usage without counting a step.
 
@@ -129,7 +162,7 @@ class Budget:
                 draft.data = _empty()
             sessions: dict[str, Any] = draft.data.setdefault("sessions", {})
             session = sessions.setdefault(event.session_id, _new_session())
-            self._refresh(session, event, source, audit_path)
+            self._refresh(session, event, source, audit_path, cost)
             session["updated_at"] = time.time()
             return _snapshot(session)
 
@@ -202,6 +235,7 @@ class Budget:
         event: HookEvent,
         source: TokenSource,
         audit_path: Path | None = None,
+        cost: CostConfig | None = None,
     ) -> None:
         cache = session.setdefault("cache", {})
         try:
@@ -225,6 +259,10 @@ class Budget:
             session["tokens"] = usage.total_tokens
         if usage.rate_limit_percent is not None:
             session["rate_limit_percent"] = usage.rate_limit_percent
+        if cost is not None:
+            cost_value = compute_cost(usage, cost)
+            if cost_value is not None:
+                session["cost"] = cost_value
 
 
 def _rebase(session: dict[str, Any]) -> None:
@@ -244,6 +282,9 @@ def _rebase(session: dict[str, Any]) -> None:
     tokens = as_int(session.get("tokens"))
     if tokens is not None:
         session["tokens_baseline"] = tokens
+    cost = as_float(session.get("cost"))
+    if cost is not None:
+        session["cost_baseline"] = cost
 
 
 def _collect(sessions: dict[str, Any], *, gc_days: int, max_sessions: int) -> None:

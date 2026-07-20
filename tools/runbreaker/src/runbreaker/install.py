@@ -86,12 +86,21 @@ threshold = 3
 # max_tokens = 2_000_000
 # trip_at_fraction = 0.9     # trip with margin — token ledgers are approximate
 
-# Uncomment to bound estimated dollar spend. A blended-price layer over token_budget;
-# coarse by design (one $/1M rate, no input/output split). Abstains on unknown usage.
+# Uncomment to bound estimated dollar spend. Prices live in [cost] below; abstains on
+# unknown usage or when no rate is set.
 # [[conditions]]
 # id = "cost_budget"
 # max_usd = 10
-# price_per_mtok = 15
+
+# Prices for cost_budget, in USD per million tokens. Per-model input/output rates are
+# exact for token-billed providers (Claude, Codex); default_per_mtok is the blended
+# fallback for other models and for sources that report only a total (VS Code/Copilot).
+# [cost]
+# default_per_mtok = 15
+# [[cost.model]]
+# id = "claude-opus-4.8"
+# input = 5
+# output = 25
 
 # Codex reports its own rate-limit usage; abstains on other providers.
 # [[conditions]]

@@ -40,16 +40,28 @@ Extract = Callable[[dict[str, Any]], int | None]
 
 #: Fold one record into a small integer-valued state dict (persisted in the cache).
 Fold = Callable[[dict[str, int], dict[str, Any]], None]
-#: Turn the accumulated state into a total, or None when nothing usable was seen.
-Finalize = Callable[[dict[str, int]], "int | None"]
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    """Tokens spent on one model, split for cost (input and output price differ)."""
+
+    model: str
+    input_tokens: int
+    output_tokens: int
 
 
 @dataclass(frozen=True)
 class ProviderUsage:
-    """What we managed to learn. `None` fields mean "could not tell"."""
+    """What we managed to learn. `None` fields mean "could not tell".
+
+    `by_model` is the per-model input/output split used for cost; it is empty when a
+    source can only report a grand total (then cost falls back to a blended rate).
+    """
 
     total_tokens: int | None = None
     rate_limit_percent: float | None = None
+    by_model: tuple[ModelUsage, ...] = ()
 
 
 UNKNOWN = ProviderUsage()
@@ -144,17 +156,17 @@ def incremental_sum(path: Path, cache: Cache, namespace: str, extract: Extract) 
     return total if seen else None
 
 
-def incremental_fold(
-    path: Path, cache: Cache, namespace: str, fold: Fold, finalize: Finalize
-) -> int | None:
+def incremental_fold(path: Path, cache: Cache, namespace: str, fold: Fold) -> dict[str, int] | None:
     """Like `incremental_sum`, but folds records into an arbitrary integer-state dict
-    instead of summing one value — for readers that need max, not sum (VS Code reports
-    `promptTokens` as the whole growing context each turn, so summing overcounts wildly).
+    and returns that dict, instead of summing one value — for readers that need max or
+    a per-model split, not a single sum. The caller turns the state into its answer.
 
     Same append-only resume (a byte offset + running state cached across invocations),
     same rotation reset and oversized-tail guard. Also resets when the resolved path
     changes, so a "newest match" that rolls to a new session file starts clean rather
-    than resuming an offset from a different file.
+    than resuming an offset from a different file. Returns None only when the file is
+    unreadable or its unread tail is too large to trust — an empty dict means "readable,
+    nothing recognized yet".
     """
     off_key, state_key, path_key = (f"{namespace}_{s}" for s in ("offset", "fold", "path"))
     try:
@@ -192,7 +204,7 @@ def incremental_fold(
         offset += consumed
         cache[off_key], cache[state_key] = offset, state
 
-    return finalize(state)
+    return state
 
 
 def iter_tail_json_lines(path: Path, max_bytes: int = 1024 * 1024) -> Iterator[dict[str, Any]]:

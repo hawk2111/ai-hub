@@ -7,9 +7,10 @@ import time
 from tests.conftest import make_event
 
 from runbreaker import audit
-from runbreaker.budget import Budget, SessionBudget, _snapshot
+from runbreaker.budget import Budget, SessionBudget, _snapshot, compute_cost
+from runbreaker.config import CostConfig, ModelRate
 from runbreaker.state import Store
-from runbreaker.tokens.base import ProviderUsage, TokenSource
+from runbreaker.tokens.base import ModelUsage, ProviderUsage, TokenSource
 
 
 class BoomSource(TokenSource):
@@ -90,6 +91,57 @@ def test_reset_rebases_cumulative_tokens_so_it_does_not_re_trip(tmp_path):
     assert budget.tick(event, GrowingSource(1000), recompute_every=1).tokens == 0
     # Only genuinely new usage since the reset is counted.
     assert budget.tick(event, GrowingSource(1300), recompute_every=1).tokens == 300
+
+
+# -- cost --------------------------------------------------------------------
+
+
+def test_compute_cost_uses_per_model_input_output_rates():
+    cfg = CostConfig(models={"opus": ModelRate(input=5, output=25)})
+    usage = ProviderUsage(
+        total_tokens=1_500_000, by_model=(ModelUsage("opus", 1_000_000, 500_000),)
+    )
+    # 1M input x $5 + 0.5M output x $25 = 5 + 12.5
+    assert compute_cost(usage, cfg) == 17.5
+
+
+def test_compute_cost_falls_back_to_blended_on_total_only():
+    cfg = CostConfig(default_per_mtok=10)
+    assert compute_cost(ProviderUsage(total_tokens=2_000_000), cfg) == 20.0
+
+
+def test_compute_cost_unknown_model_uses_the_default_rate():
+    cfg = CostConfig(default_per_mtok=10, models={"opus": ModelRate(5, 25)})
+    usage = ProviderUsage(by_model=(ModelUsage("sonnet", 1_000_000, 0),))
+    assert compute_cost(usage, cfg) == 10.0
+
+
+def test_compute_cost_abstains_when_cost_is_not_configured():
+    assert compute_cost(ProviderUsage(total_tokens=10**9), CostConfig()) is None
+
+
+class CostSource(TokenSource):
+    id = "cost"
+
+    def __init__(self, model: str, inp: int, out: int) -> None:
+        self.usage = ProviderUsage(total_tokens=inp + out, by_model=(ModelUsage(model, inp, out),))
+
+    def read(self, event, cache):  # type: ignore[override]
+        return self.usage
+
+
+def test_cost_is_tracked_and_rebased_on_reset(tmp_path):
+    cfg = CostConfig(models={"m": ModelRate(input=10, output=10)})
+    budget = Budget(Store(tmp_path / "state"))
+    event = make_event()
+
+    def cost(inp: int) -> float | None:
+        return budget.tick(event, CostSource("m", inp, 0), recompute_every=1, cost=cfg).cost_usd
+
+    assert cost(1_000_000) == 10.0  # 1M input x $10
+    budget.reset()
+    assert cost(1_000_000) == 0.0  # same cumulative reading, rebased to the reset
+    assert cost(2_000_000) == 10.0  # only new spend since the reset
 
 
 def test_reset_also_zeroes_steps_and_the_loop_tail(tmp_path):

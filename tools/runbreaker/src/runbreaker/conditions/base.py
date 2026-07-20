@@ -36,6 +36,8 @@ class EvalContext:
     elapsed_seconds: float = 0.0
     #: Recent tool-call fingerprints, oldest first. Feeds the loop guard.
     recent_tools: tuple[str, ...] = ()
+    #: Estimated USD spend since the last reset. Feeds cost_budget.
+    cost_usd: float | None = None
 
 
 class Condition(ABC):

@@ -109,7 +109,7 @@ wins.
 | `step_budget` | the run makes more than `max_steps` tool calls | each call | all | `max_steps` (250) |
 | `time_budget` | the run has run longer than `max_minutes` of wall-clock time | each call + finish | all | `max_minutes` (off) |
 | `token_budget` | token use passes `trip_at_fraction × max_tokens` | each call + finish | Claude, Codex, VS Code ¹ | `max_tokens` (off), `trip_at_fraction` (0.9) |
-| `cost_budget` | estimated spend (tokens × price) passes `max_usd` | each call + finish | Claude, Codex, VS Code ¹ | `max_usd` (off), `price_per_mtok` |
+| `cost_budget` | estimated spend passes `max_usd` (priced via `[cost]`) | each call + finish | Claude, Codex, VS Code ¹ | `max_usd` (off); rates in `[cost]` |
 | `rate_limit_pressure` | the provider reports more than `max_percent` of its rate limit used | each call + finish | Codex only ¹ | `max_percent` (80) |
 | `repeat_loop` | the same call — or an A-B-A-B cycle — repeats `threshold` times | each call | all | `threshold` (5) |
 | `gate_failures` | the quality gate comes back red `threshold` times in a row | finish | all | `threshold` (3) |
@@ -151,9 +151,8 @@ max_tokens = 2_000_000
 trip_at_fraction = 0.9      # trip with margin — token ledgers are approximate
 
 [[conditions]]
-id = "cost_budget"          # a blended-price layer over token_budget; abstains when tokens unknown
+id = "cost_budget"          # dollar ceiling; prices come from [cost] below
 max_usd = 10
-price_per_mtok = 15         # blended $/1M tokens; coarse by design
 
 [[conditions]]
 id = "rate_limit_pressure"  # Codex only; abstains elsewhere
@@ -166,6 +165,16 @@ threshold = 5               # 0 disables
 [[conditions]]
 id = "gate_failures"
 threshold = 3
+
+# Prices for cost_budget, in USD per million tokens. Per-model input/output rates are
+# exact for token-billed providers (Claude, Codex); default_per_mtok is the blended
+# fallback for other models and for sources that report only a total.
+[cost]
+default_per_mtok = 15
+[[cost.model]]
+id = "claude-opus-4.8"
+input = 5
+output = 25
 
 # Observe without enforcing: conditions and the gate still evaluate and audit what
 # they *would* have done, but nothing is denied or blocked. Tune thresholds first,
@@ -220,8 +229,16 @@ cost check reads usage for the current session id from the file the provider wri
 that number only grows within a run. Claude and Codex report per-request counts, which
 are **summed**. VS Code reports `promptTokens` as the whole growing context each turn, so
 it is **maxed** and only `completionTokens` is summed (`max(prompt) + sum(completion)`) —
-summing the context would count it over and over. Cost multiplies the total by a blended
-`$/1M` rate, so it is approximate.
+summing the context would count it over and over.
+
+**Cost is priced per model, from the `[cost]` rate table.** Different models cost
+different amounts, so a single blended rate is unreliable. Where the transcript records
+the model and an input/output split (Claude, Codex), `cost_budget` prices each with that
+model's `input`/`output` rate — `Σ (input × rate_in + output × rate_out)`. A model with
+no configured rate, and any source that reports only a grand total, fall back to
+`default_per_mtok`. It stays an estimate: token ledgers are approximate, and VS Code /
+Copilot bill in **credits** (requests × a per-model multiplier), not per-model tokens —
+their logs carry no cost figure — so there cost is a rough proxy, not an invoice.
 
 **Reset rebases tokens across every session; it does not rewind them.** The breaker is a
 single global switch, so `runbreaker reset` restarts the step, time and loop budgets — for

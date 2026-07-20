@@ -23,6 +23,7 @@ from runbreaker.events import HookEvent
 from runbreaker.tokens.base import (
     UNKNOWN,
     Cache,
+    ModelUsage,
     ProviderUsage,
     TokenSource,
     as_float,
@@ -36,6 +37,15 @@ TOTAL_PATHS = (
     "payload.info.total_tokens",
     "info.total_token_usage.total_tokens",
 )
+INPUT_PATHS = (
+    "payload.info.total_token_usage.input_tokens",
+    "info.total_token_usage.input_tokens",
+)
+OUTPUT_PATHS = (
+    "payload.info.total_token_usage.output_tokens",
+    "info.total_token_usage.output_tokens",
+)
+MODEL_PATHS = ("payload.info.model", "payload.model", "info.model", "model")
 RATE_LIMIT_PATHS = (
     "payload.rate_limits.primary.used_percent",
     "rate_limits.primary.used_percent",
@@ -71,9 +81,18 @@ class CodexTokenSource(TokenSource):
         if last is None:
             return UNKNOWN
 
+        total = as_int(first_hit(last, TOTAL_PATHS))
+        # The cumulative record sometimes splits input/output; when it does, expose a
+        # per-model breakdown for cost. Otherwise cost falls back to a blended rate on
+        # the total. Both are cumulative, so the newest record is the whole session.
+        inp = as_int(first_hit(last, INPUT_PATHS))
+        out = as_int(first_hit(last, OUTPUT_PATHS))
+        model = str(first_hit(last, MODEL_PATHS) or "codex")
+        by_model = (ModelUsage(model, inp, out),) if inp is not None and out is not None else ()
         return ProviderUsage(
-            total_tokens=as_int(first_hit(last, TOTAL_PATHS)),
+            total_tokens=total,
             rate_limit_percent=as_float(first_hit(last, RATE_LIMIT_PATHS)),
+            by_model=by_model,
         )
 
     def _resolve(self, event: HookEvent, cache: Cache) -> Path | None:

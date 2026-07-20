@@ -96,11 +96,19 @@ def test_cost_budget_disabled_without_a_price_or_ceiling():
 
 
 def test_cost_budget_trips_when_estimated_spend_exceeds_the_ceiling():
-    # 1M tokens @ $15/1M = $15 spend against a $10 ceiling.
+    # Legacy blended fallback: 1M tokens @ $15/1M = $15 against a $10 ceiling.
     cond = CostBudget(max_usd=10, price_per_mtok=15)
     assert cond.evaluate(ctx(tokens=600_000)) is None  # $9 < $10
     trip = cond.evaluate(ctx(tokens=1_000_000))
     assert trip is not None and "15.00" in trip.reason
+
+
+def test_cost_budget_uses_the_central_cost_when_present():
+    """The computed per-model cost (ctx.cost_usd) wins over the legacy blended path."""
+    cond = CostBudget(max_usd=10)
+    assert cond.evaluate(ctx(cost_usd=9.0)) is None
+    trip = cond.evaluate(ctx(cost_usd=11.5))
+    assert trip is not None and "11.50" in trip.reason
 
 
 # -- repeat_loop ------------------------------------------------------------
