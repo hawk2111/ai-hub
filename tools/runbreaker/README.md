@@ -115,9 +115,10 @@ wins.
 | `gate_failures` | the quality gate comes back red `threshold` times in a row | finish | all | `threshold` (3) |
 
 ¹ **Abstains** (never trips) when it cannot read the number — an unknown token count is
-never treated as zero. Copilot does not expose tokens, so on Copilot only the
-provider-agnostic conditions apply: `step_budget`, `time_budget`, `repeat_loop`,
-`gate_failures`.
+never treated as zero. Copilot CLI and Copilot in VS Code do not expose usage to hooks,
+so there only the provider-agnostic conditions apply: `step_budget`, `time_budget`,
+`repeat_loop`, `gate_failures`. (See [Provider notes](#provider-notes) for the VS Code
+details.)
 
 `repeat_loop` matches calls exactly (tool name + a hash of the input), so an ordinary
 edit → test → edit cycle that changes the file each time is *not* a loop and never
@@ -261,6 +262,24 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
   tools from the legacy `copilot_*` prefix to prefix-less snake_case (`create_file`,
   `apply_patch`, `replace_string_in_file`, …); runbreaker gates **both** schemes so a
   rename cannot silently let a write slip past. Agent hooks there are still Preview.
+
+### Which conditions work in VS Code
+
+| condition | works? | why |
+|---|---|---|
+| `step_budget` `time_budget` `repeat_loop` `gate_failures` | **yes** | provider-agnostic — need nothing from the host |
+| `token_budget` `cost_budget` | **wired, usually abstains** | see below |
+| `rate_limit_pressure` | **no** | VS Code reports no rate-limit percentage to hooks |
+
+The token and cost conditions are hooked up (`token_source = "auto"` resolves to the
+VS Code reader) and start working the moment a run's usage is readable — but today it
+usually is not. VS Code hands hooks a `transcript_path` only on **Stop**, its format is
+documented as "not a stable hook API", and the one place VS Code records real usage
+(`promptTokens` / `completionTokens`) is the opt-in agent debug log
+(`github.copilot.chat.agentDebugLog.fileLogging.enabled`), whose path is never given to
+a hook. So these conditions **abstain** (never trip on a guessed number) rather than
+enforce. If the transcript ever carries usage, they work with no config change; until
+then, guard VS Code with the four provider-agnostic conditions above.
 
 ## No shell scripts
 

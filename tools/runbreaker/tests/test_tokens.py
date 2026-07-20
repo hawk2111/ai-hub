@@ -16,7 +16,8 @@ from runbreaker.events import EventType
 from runbreaker.tokens import get_source
 from runbreaker.tokens.claude import ClaudeTokenSource
 from runbreaker.tokens.codex import CodexTokenSource
-from runbreaker.tokens.copilot import CopilotTokenSource
+from runbreaker.tokens.copilot import CopilotTokenSource, usage_tokens
+from runbreaker.tokens.vscode import VSCodeTokenSource
 
 
 def write_jsonl(path: Path, records: list[dict]) -> Path:
@@ -153,12 +154,41 @@ def test_copilot_reuses_the_transcript_path_cached_at_stop(tmp_path):
     assert CopilotTokenSource().read(event, cache).total_tokens == 77
 
 
+# -- VS Code ----------------------------------------------------------------
+
+
+def test_vscode_without_a_transcript_is_unknown():
+    """PreToolUse in VS Code carries no transcript_path, so there is nothing to read."""
+    event = make_event(provider="vscode", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens is None
+
+
+def test_vscode_reads_prompt_and_completion_tokens_from_the_transcript(tmp_path):
+    """The plumbing works the moment a VS Code transcript carries usage."""
+    path = write_jsonl(tmp_path / "t.jsonl", [{"promptTokens": 800, "completionTokens": 400}])
+    event = make_event(provider="vscode", transcript_path=str(path), event=EventType.STOP)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 1200
+
+
+def test_usage_tokens_recognises_vscode_field_names():
+    assert usage_tokens({"promptTokens": 30, "completionTokens": 12}) == 42
+    assert usage_tokens({"usage": {"promptTokens": 5, "completionTokens": 5}}) == 10
+    assert usage_tokens({"totalTokens": 99}) == 99
+    assert usage_tokens({"nothing": 1}) is None
+
+
 # -- registry ---------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("provider", "expected"),
-    [("claude", "claude"), ("codex", "codex"), ("copilot", "copilot"), ("mystery", "null")],
+    [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("copilot", "copilot"),
+        ("vscode", "vscode"),
+        ("mystery", "null"),
+    ],
 )
 def test_auto_resolves_by_provider(provider, expected):
     assert get_source("auto", provider).id == expected

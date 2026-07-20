@@ -268,6 +268,32 @@ def test_prefix_less_vscode_write_is_denied_through_a_claude_shim(
     assert "circuit breaker is OPEN" in err
 
 
+def test_vscode_token_budget_reads_the_stop_transcript(
+    project, state_dir, tmp_path, monkeypatch, capsys
+):
+    """End to end: provider=vscode resolves the VS Code token source, which reads the
+    Stop transcript's promptTokens/completionTokens — so token_budget can trip."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text('{"promptTokens": 800, "completionTokens": 400}\n', encoding="utf-8")
+    write_config(
+        project,
+        """
+        [[conditions]]
+        id = "token_budget"
+        max_tokens = 1000
+        trip_at_fraction = 0.5
+        """,
+    )
+    payload = {
+        "session_id": "v1",
+        "cwd": "/tmp",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+    }
+    run_hook(payload, "vscode", "stop", monkeypatch, capsys)
+    assert Breaker(Store(state_dir)).status().is_open, "1200 tokens > 500 (0.5*1000) must trip"
+
+
 @pytest.mark.parametrize(
     ("tool", "expected"),
     [
