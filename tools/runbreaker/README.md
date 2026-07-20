@@ -211,6 +211,13 @@ fresh instead.
 **A green gate never closes an open breaker.** One passing check is not evidence that
 whatever tripped it is fixed.
 
+**Reset rebases tokens, it does not rewind them.** `runbreaker reset` restarts the step,
+time and loop budgets from zero — but the provider's transcript still holds every token
+the run spent, and a reset cannot rewind that file. So the token and cost budgets rebase
+to the reading captured at reset and count usage *from the reset onward*. Without this a
+reset would re-read the same cumulative total and re-open the breaker on the very next
+call.
+
 **Warn mode never opens the breaker.** In `mode = "warn"` a condition that trips is
 audited (`decision: "warn"`) but the breaker stays closed, so the gate keeps running
 and observation continues turn after turn. Opening it and merely declining to deny
@@ -295,6 +302,11 @@ sum that would count the context over and over. Cost is therefore approximate (i
 not model cached vs. new input). Unreadable or unrecognized input still abstains — never
 a guessed number. Without the knob, guard VS Code with the four provider-agnostic
 conditions above.
+
+With **several VS Code windows open at once**, a plain "newest file" would let one
+session read another's usage. VS Code names each session log by its id, so when the
+hook's `session_id` matches a file the reader uses *that* file, and only falls back to
+the newest match when no session log matches.
 
 ## No shell scripts
 

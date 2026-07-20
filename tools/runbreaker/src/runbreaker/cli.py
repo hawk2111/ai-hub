@@ -57,7 +57,7 @@ def _cmd_reset(cfg: config_module.Config, _args: argparse.Namespace) -> int:
     breaker, budget = _parts(cfg)
     breaker.reset()
     budget.reset()
-    print("circuit breaker: CLOSED (writes enabled); run budget cleared")
+    print("circuit breaker: CLOSED (writes enabled); run budget reset")
     return 0
 
 

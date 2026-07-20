@@ -79,8 +79,14 @@ def _finalize(state: dict[str, int]) -> int | None:
     return state.get("prompt_max", 0) + state.get("completion_sum", 0)
 
 
-def _newest_match(pattern: str) -> Path | None:
-    """A single file as-is; a directory or glob → its most recently modified match."""
+def _match(pattern: str, session_id: str) -> Path | None:
+    """Resolve the knob to one file.
+
+    A single file is used as-is. A directory or glob is expanded and then, so that
+    concurrent VS Code windows do not read each other's usage, we prefer the file
+    named for *this* session (VS Code names each session log by its id) before
+    falling back to the most recently modified match.
+    """
     base = Path(pattern).expanduser()
     if base.is_file():
         return base
@@ -92,6 +98,10 @@ def _newest_match(pattern: str) -> Path | None:
         files = [p for p in matches if p.is_file()]
         if not files:
             return None
+        if session_id:
+            for path in files:
+                if path.stem == session_id:
+                    return path
         return max(files, key=lambda p: p.stat().st_mtime)
     except OSError:
         return None
@@ -100,7 +110,7 @@ def _newest_match(pattern: str) -> Path | None:
 def _resolve_path(event: HookEvent, cache: Cache) -> Path | None:
     configured = os.environ.get(USAGE_LOG_ENV)
     if configured:
-        return _newest_match(configured)
+        return _match(configured, event.session_id)
     # Fall back to the hook-provided transcript (Stop only), caching it for reuse.
     path = event.transcript_path or cache.get("transcript_path")
     if path:

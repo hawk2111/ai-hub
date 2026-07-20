@@ -218,6 +218,18 @@ def test_vscode_usage_log_glob_picks_the_newest_file(tmp_path, monkeypatch):
     assert VSCodeTokenSource().read(event, {}).total_tokens == 900
 
 
+def test_vscode_usage_log_prefers_the_file_for_this_session(tmp_path, monkeypatch):
+    """Concurrent VS Code windows: each session must read its own log, not whichever
+    file was written most recently across all of them."""
+    mine = write_jsonl(tmp_path / "sess-A.jsonl", [{"promptTokens": 100}])
+    other = write_jsonl(tmp_path / "sess-B.jsonl", [{"promptTokens": 900}])
+    os.utime(mine, (1, 1))  # mine is OLDER — a newest-match would wrongly pick B
+    os.utime(other, (2, 2))
+    monkeypatch.setenv("RUNBREAKER_VSCODE_USAGE_LOG", str(tmp_path / "*.jsonl"))
+    event = make_event(provider="vscode", session_id="sess-A", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 100, "its own file, not B's 900"
+
+
 def test_vscode_reader_resets_when_the_newest_file_rolls(tmp_path, monkeypatch):
     """A cursor cached against session A must not resume into a fresh session B."""
     a = write_jsonl(tmp_path / "a.jsonl", [{"promptTokens": 100, "completionTokens": 10}])

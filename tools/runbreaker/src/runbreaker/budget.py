@@ -63,9 +63,14 @@ def _snapshot(session: dict[str, Any]) -> SessionBudget:
     # JSON `true` in a persisted field degrades to "unknown" instead of 1.
     started = as_float(session.get("started_at")) or 0.0
     recent = session.get("recent")
+    # Tokens are reported relative to the last reset. The provider's transcript is
+    # cumulative and a reset cannot rewind it, so we subtract the reading captured at
+    # reset time — otherwise the budget would re-trip on the first call after a reset.
+    absolute = as_int(session.get("tokens"))
+    baseline = as_int(session.get("tokens_baseline")) or 0
     return SessionBudget(
         steps=int(session.get("steps", 0)),
-        tokens=as_int(session.get("tokens")),
+        tokens=max(0, absolute - baseline) if absolute is not None else None,
         rate_limit_percent=as_float(session.get("rate_limit_percent")),
         elapsed_seconds=max(0.0, time.time() - started) if started else 0.0,
         recent_tools=tuple(str(f) for f in recent) if isinstance(recent, list) else (),
@@ -138,11 +143,23 @@ class Budget:
         return {} if draft.corrupt else dict(draft.data.get("sessions", {}))
 
     def reset(self, session_id: str | None = None) -> None:
+        """Restart the run budgets. Steps, the loop tail and the clock genuinely zero;
+        cumulative tokens rebase to the current reading (see `_rebase`)."""
         with self._store.update(NAME, _empty) as draft:
-            if session_id is None or draft.corrupt:
+            if draft.corrupt:
                 draft.data = _empty()
                 return
-            draft.data.get("sessions", {}).pop(session_id, None)
+            sessions: dict[str, Any] = draft.data.get("sessions", {})
+            targets = (
+                list(sessions.values())
+                if session_id is None
+                else [s for s in [sessions.get(session_id)] if s]
+            )
+            if not targets:
+                draft.write = False
+                return
+            for session in targets:
+                _rebase(session)
 
     def bump_stop_blocks(self, session_id: str) -> int:
         """Count how many times we have blocked this session from finishing.
@@ -208,6 +225,25 @@ class Budget:
             session["tokens"] = usage.total_tokens
         if usage.rate_limit_percent is not None:
             session["rate_limit_percent"] = usage.rate_limit_percent
+
+
+def _rebase(session: dict[str, Any]) -> None:
+    """Restart a session's run budgets in place.
+
+    Steps, the loop tail, the stop-block guard and the clock reset to zero. Tokens
+    are the exception: the provider's transcript still holds every token this session
+    spent, so zeroing here and re-reading would just recompute the same total and
+    re-open the breaker on the next call. Instead we record the current reading as a
+    baseline that the snapshot subtracts, so the budget now counts usage *since the
+    reset*. The token-source cursor in `cache` is deliberately left intact.
+    """
+    session["steps"] = 0
+    session["recent"] = []
+    session["stop_blocks"] = 0
+    session["started_at"] = time.time()
+    tokens = as_int(session.get("tokens"))
+    if tokens is not None:
+        session["tokens_baseline"] = tokens
 
 
 def _collect(sessions: dict[str, Any], *, gc_days: int, max_sessions: int) -> None:
