@@ -52,7 +52,7 @@ nothing deadlocks.
    ```bash
    runbreaker status     # what tripped, as JSON
    runbreaker report     # a summary of recent trips and denials
-   runbreaker reset      # close the breaker and clear the run budget
+   runbreaker reset      # close the breaker and reset the run budget
    ```
 
 **Not sure your limits are right?** Start in **warn mode**: runbreaker records what it
@@ -61,22 +61,6 @@ nothing deadlocks.
 ```bash
 RUNBREAKER_ENFORCE=warn   # or set [breaker] mode = "warn" in the config
 ```
-
-## How it works
-
-Each host CLI spawns one hook process per tool call. A thin **provider adapter**
-translates that CLI's payload into a normalized event; a **condition registry**
-decides whether to open the breaker; the open breaker is the single point that
-denies anything.
-
-```
-host CLI ──▶ shim ──▶ hook.main ──▶ adapter.parse ──▶ handler ──▶ conditions
-                                          ▲                          │
-                                          └──── adapter.emit ◀── breaker
-```
-
-Adding a fourth CLI is one adapter module. Adding a trip condition is one class —
-including your own, dropped into `.runbreaker/conditions/`.
 
 ## Concepts
 
@@ -96,6 +80,22 @@ New to the tool? These five words carry the whole model:
   tries to finish. A red gate is handed back so the agent fixes its own mess; stay red
   too often and the breaker opens.
 
+## How it works
+
+Each host CLI spawns one hook process per tool call. A thin **provider adapter**
+translates that CLI's payload into a normalized event; a **condition registry**
+decides whether to open the breaker; the open breaker is the single point that
+denies anything.
+
+```
+host CLI ──▶ shim ──▶ hook.main ──▶ adapter.parse ──▶ handler ──▶ conditions
+                                          ▲                          │
+                                          └──── adapter.emit ◀── breaker
+```
+
+Adding a fourth CLI is one adapter module. Adding a trip condition is one class —
+including your own, dropped into `.runbreaker/conditions/`.
+
 ## Conditions
 
 A condition trips the breaker; the open breaker is what actually denies anything. You
@@ -108,17 +108,17 @@ wins.
 |---|---|---|---|---|
 | `step_budget` | the run makes more than `max_steps` tool calls | each call | all | `max_steps` (250) |
 | `time_budget` | the run has run longer than `max_minutes` of wall-clock time | each call + finish | all | `max_minutes` (off) |
-| `token_budget` | token use passes `trip_at_fraction × max_tokens` | each call + finish | Claude, Codex ¹ | `max_tokens` (off), `trip_at_fraction` (0.9) |
-| `cost_budget` | estimated spend (tokens × price) passes `max_usd` | each call + finish | Claude, Codex ¹ | `max_usd` (off), `price_per_mtok` |
+| `token_budget` | token use passes `trip_at_fraction × max_tokens` | each call + finish | Claude, Codex, VS Code ¹ | `max_tokens` (off), `trip_at_fraction` (0.9) |
+| `cost_budget` | estimated spend (tokens × price) passes `max_usd` | each call + finish | Claude, Codex, VS Code ¹ | `max_usd` (off), `price_per_mtok` |
 | `rate_limit_pressure` | the provider reports more than `max_percent` of its rate limit used | each call + finish | Codex only ¹ | `max_percent` (80) |
 | `repeat_loop` | the same call — or an A-B-A-B cycle — repeats `threshold` times | each call | all | `threshold` (5) |
 | `gate_failures` | the quality gate comes back red `threshold` times in a row | finish | all | `threshold` (3) |
 
 ¹ **Abstains** (never trips) when it cannot read the number — an unknown token count is
-never treated as zero. Copilot CLI and Copilot in VS Code do not expose usage to hooks,
-so there only the provider-agnostic conditions apply: `step_budget`, `time_budget`,
-`repeat_loop`, `gate_failures`. (See [Provider notes](#provider-notes) for the VS Code
-details.)
+never treated as zero. Copilot CLI exposes no usage to hooks, so there only the
+provider-agnostic conditions apply (`step_budget`, `time_budget`, `repeat_loop`,
+`gate_failures`). VS Code can read usage too, but only via an opt-in log — see
+[Provider notes](#provider-notes).
 
 `repeat_loop` matches calls exactly (tool name + a hash of the input), so an ordinary
 edit → test → edit cycle that changes the file each time is *not* a loop and never
@@ -187,9 +187,13 @@ fail_records_breaker = true
 Env: `RUNBREAKER_MAX_STEPS`, `RUNBREAKER_MAX_TOKENS`, `RUNBREAKER_MAX_MINUTES`,
 `RUNBREAKER_MAX_USD`, `RUNBREAKER_MAX_REPEATS`, `RUNBREAKER_BREAKER_THRESHOLD`,
 `RUNBREAKER_MAX_RATE_PERCENT`, `RUNBREAKER_ENFORCE` (`block` / `warn`),
-`RUNBREAKER_SKIP_BUDGET`, `RUNBREAKER_SKIP_GATE`, `RUNBREAKER_HOME`,
-`RUNBREAKER_PROJECT_DIR`, `RUNBREAKER_GC_DAYS`, `RUNBREAKER_VSCODE_USAGE_LOG`
+`RUNBREAKER_SKIP_BUDGET`, `RUNBREAKER_SKIP_GATE`, `RUNBREAKER_TOKEN_SOURCE`,
+`RUNBREAKER_RECOMPUTE_EVERY`, `RUNBREAKER_HOME`, `RUNBREAKER_PROJECT_DIR`,
+`RUNBREAKER_GC_DAYS`, `RUNBREAKER_MAX_SESSIONS`, `RUNBREAKER_VSCODE_USAGE_LOG`
 (see [Provider notes](#provider-notes)).
+
+Session ledgers are pruned automatically (by age and count); `runbreaker gc` prunes them
+on demand, and `RUNBREAKER_GC_DAYS` / `RUNBREAKER_MAX_SESSIONS` tune the retention.
 
 ## Design decisions worth knowing
 
@@ -211,12 +215,21 @@ fresh instead.
 **A green gate never closes an open breaker.** One passing check is not evidence that
 whatever tripped it is fixed.
 
-**Reset rebases tokens, it does not rewind them.** `runbreaker reset` restarts the step,
-time and loop budgets from zero — but the provider's transcript still holds every token
-the run spent, and a reset cannot rewind that file. So the token and cost budgets rebase
-to the reading captured at reset and count usage *from the reset onward*. Without this a
-reset would re-read the same cumulative total and re-open the breaker on the very next
-call.
+**Tokens are counted per run, read from the provider's own transcript.** Each token and
+cost check reads usage for the current session id from the file the provider writes, and
+that number only grows within a run. Claude and Codex report per-request counts, which
+are **summed**. VS Code reports `promptTokens` as the whole growing context each turn, so
+it is **maxed** and only `completionTokens` is summed (`max(prompt) + sum(completion)`) —
+summing the context would count it over and over. Cost multiplies the total by a blended
+`$/1M` rate, so it is approximate.
+
+**Reset rebases tokens across every session; it does not rewind them.** The breaker is a
+single global switch, so `runbreaker reset` restarts the step, time and loop budgets — for
+*all* tracked sessions — from zero. Tokens are the exception: the provider's transcript
+still holds every token a run spent and a reset cannot rewind that file, so the token and
+cost budgets rebase to the reading captured at reset and count usage *from the reset
+onward*. Without this, a reset would re-read the same cumulative total and re-open the
+breaker on the very next call.
 
 **Warn mode never opens the breaker.** In `mode = "warn"` a condition that trips is
 audited (`decision: "warn"`) but the breaker stays closed, so the gate keeps running
@@ -244,8 +257,8 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
 |---|---|---|---|---|
 | config | `.claude/settings.json` | `.codex/hooks.json` | `.github/hooks/runbreaker.json` | reuses the other two |
 | write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` | `create` `edit` | `create_file`, `apply_patch`, `replace_string_in_file`, … (and legacy `copilot_*`) |
-| step budget | yes | yes | yes | yes |
-| token budget | yes | yes | **no** | no |
+| step / time / loop / gate | yes | yes | yes | yes |
+| token / cost budget | yes | yes | **no** | opt-in (below) |
 | rate-limit pressure | no | yes | no | no |
 | non-zero exit ≠ 2 | fails open | error | **fails closed** | fails open |
 
@@ -261,7 +274,8 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
   neither the hook payload nor any documented file
   ([#2947](https://github.com/github/copilot-cli/issues/2947) is open). Hooks are
   registered under PascalCase event names so Copilot emits VS Code-compatible
-  snake_case payloads. Only `step_budget` applies.
+  snake_case payloads. The token and cost budgets abstain; the provider-agnostic
+  conditions (`step_budget`, `time_budget`, `repeat_loop`, `gate_failures`) still apply.
 - **Copilot in VS Code** is a different product with a different tool vocabulary, and
   its `chat.hookFilesLocations` reads `.claude/settings.json` and `.github/hooks/*.json`
   by default — so a shim installed for another host ends up handling VS Code tool calls.
@@ -287,9 +301,10 @@ real usage (`promptTokens` / `completionTokens`) is the opt-in agent session log
 a hook.
 
 **To turn token/cost budgets on in VS Code:** enable that session logging, then point
-runbreaker at the log with `RUNBREAKER_VSCODE_USAGE_LOG`. It accepts a file, a
-directory, or a glob — a directory/glob resolves to the **most recently modified** match
-(the active session), e.g.:
+runbreaker at the log with `RUNBREAKER_VSCODE_USAGE_LOG`. It accepts a file, a directory,
+or a glob. A directory/glob resolves to **this session's own log** when it can — VS Code
+names each log by its session id, so several open windows never read each other's usage —
+and otherwise to the most recently modified match, e.g.:
 
 ```bash
 export RUNBREAKER_VSCODE_USAGE_LOG="$HOME/.config/Code/User/**/chatSessions/*.jsonl"
@@ -302,11 +317,6 @@ sum that would count the context over and over. Cost is therefore approximate (i
 not model cached vs. new input). Unreadable or unrecognized input still abstains — never
 a guessed number. Without the knob, guard VS Code with the four provider-agnostic
 conditions above.
-
-With **several VS Code windows open at once**, a plain "newest file" would let one
-session read another's usage. VS Code names each session log by its id, so when the
-hook's `session_id` matches a file the reader uses *that* file, and only falls back to
-the newest match when no session log matches.
 
 ## No shell scripts
 
@@ -384,3 +394,7 @@ Hooks have **zero runtime dependencies** and must keep it that way: the host CLI
 spawns them as a bare `python3`, with no venv active. `scripts/check_stdlib_only.py`
 enforces it, and CI runs the suite on Linux and Windows because the locking backend,
 the interpreter path and the shell quoting all differ between them.
+
+## License
+
+MIT.
