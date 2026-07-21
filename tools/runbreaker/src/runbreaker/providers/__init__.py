@@ -2,8 +2,9 @@
 
 The installer bakes `--provider` into every hook command, so detection is normally
 a lookup. Sniffing exists only so a hand-written config degrades gracefully instead
-of misrouting: under PascalCase payloads all three CLIs look alike, and Claude and
-Codex are genuinely indistinguishable from the payload alone.
+of misrouting: under PascalCase payloads all three CLIs look alike. Codex still gives
+itself away by `turn_id` / `tool_use_id` (or `$CODEX_HOME`); only with none of those
+present do Claude and Codex collapse to the same fallback.
 
 One case overrides the flag. VS Code's agent mode reads `.claude/settings.json` and
 `.github/hooks/*.json` — hook files we installed for *other* hosts — so a shim baked

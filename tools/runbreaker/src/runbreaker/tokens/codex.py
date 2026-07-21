@@ -5,8 +5,8 @@ Two things differ from Claude and both are easy to get wrong:
 * Codex totals are **cumulative**, so we take the last record rather than
   summing — summing would multiply-count the whole session.
 * The rollout filename embeds a timestamp *before* the session id
-  (`rollout-2026-05-21T21-18-45-<uuid>.jsonl`), so the glob needs a wildcard on
-  both sides.
+  (`rollout-2026-05-21T21-18-45-<uuid>.jsonl`) and lives under dated subdirectories,
+  so the glob wildcards the timestamp (`rollout-*-<id>`) and recurses (`sessions/**/`).
 
 The same record carries `rate_limits`, a provider-computed percentage of the
 plan's window. That number is authoritative and immune to token-schema drift,

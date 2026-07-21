@@ -50,7 +50,7 @@ nothing deadlocks.
    passing test never does it for you:
 
    ```bash
-   runbreaker status     # what tripped, as JSON
+   runbreaker status     # what tripped and the active limits (--json for machines)
    runbreaker report     # a summary of recent trips and denials
    runbreaker reset      # close the breaker and reset the run budget
    ```
@@ -226,10 +226,12 @@ whatever tripped it is fixed.
 
 **Tokens are counted per run, read from the provider's own transcript.** Each token and
 cost check reads usage for the current session id from the file the provider writes, and
-that number only grows within a run. Claude and Codex report per-request counts, which
-are **summed**. VS Code reports `promptTokens` as the whole growing context each turn, so
-it is **maxed** and only `completionTokens` is summed (`max(prompt) + sum(completion)`) —
-summing the context would count it over and over.
+that number only grows within a run. Claude reports per-request counts, which are
+**summed**; Codex reports a **cumulative** session total, so runbreaker takes the **newest**
+record rather than summing (summing would multiply-count the whole session). VS Code reports
+`promptTokens` as the whole growing context each turn, so it is **maxed** and only
+`completionTokens` is summed (`max(prompt) + sum(completion)`) — summing the context would
+count it over and over.
 
 **Cost is priced per model, from the `[cost]` rate table.** Different models cost
 different amounts, so a single blended rate is unreliable. Where the transcript records
@@ -273,7 +275,7 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
 | | Claude Code | Codex CLI | Copilot CLI | Copilot in VS Code |
 |---|---|---|---|---|
 | config | `.claude/settings.json` | `.codex/hooks.json` | `.github/hooks/runbreaker.json` | reuses the other two |
-| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` | `create` `edit` | `create_file`, `apply_patch`, `replace_string_in_file`, … (and legacy `copilot_*`) |
+| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` `Edit` `Write` | `create` `edit` | `create_file`, `apply_patch`, `replace_string_in_file`, … (and legacy `copilot_*`) |
 | step / time / loop / gate | yes | yes | yes | yes |
 | token / cost budget | yes | yes | **no** | opt-in (below) |
 | rate-limit pressure | no | yes | no | no |

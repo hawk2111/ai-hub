@@ -1,10 +1,12 @@
 """Wire runbreaker into each host CLI's hook configuration.
 
-Hooks are spawned as a bare `python3`, with no venv active, so the package has to
-be findable without one. `install` resolves the package's absolute location once
-and bakes it into a shim script per (provider, event). A `PYTHONPATH=...` prefix
-inside the command string would work only if the provider runs commands through a
-shell — none of the three promise that.
+Hooks are spawned by the interpreter that ran `install` (`sys.executable`; see
+`interpreter()`), with no venv guaranteed on `sys.path`, so the package has to be
+findable without one. `install` resolves the package's absolute location once and
+bakes it into a shim script per (provider, event). A `PYTHONPATH=...` env-prefix in
+the command string would need a POSIX shell that honors `VAR=val cmd`; Codex and
+Copilot do hand the string to *a* shell, but it may be PowerShell, so none of the
+three can be relied on for that.
 
 Existing config files are merged, never clobbered.
 """
@@ -47,7 +49,8 @@ except BaseException:
     raise SystemExit(0)
 '''
 
-CONFIG_TEMPLATE = """# runbreaker — https://github.com/  (see README.md)
+CONFIG_TEMPLATE = """# runbreaker — https://github.com/hawk2111/ai-hub/tree/main/tools/runbreaker
+# (see README.md)
 # Environment variables (RUNBREAKER_*) override everything here.
 
 [budget]
@@ -87,7 +90,8 @@ threshold = 3
 # trip_at_fraction = 0.9     # trip with margin — token ledgers are approximate
 
 # Uncomment to bound estimated dollar spend. Prices live in [cost] below; abstains on
-# unknown usage or when no rate is set.
+# unknown usage or when no rate is set — so this (and RUNBREAKER_MAX_USD) does nothing
+# until [cost] is configured. To cap spend without a rate table, use token_budget above.
 # [[conditions]]
 # id = "cost_budget"
 # max_usd = 10
