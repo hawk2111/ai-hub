@@ -38,13 +38,30 @@ Cache = MutableMapping[str, Any]
 #: Pull the token count out of one record, or None if it carries none.
 Extract = Callable[[dict[str, Any]], int | None]
 
+#: Fold one record into a small integer-valued state dict (persisted in the cache).
+Fold = Callable[[dict[str, int], dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    """Tokens spent on one model, split for cost (input and output price differ)."""
+
+    model: str
+    input_tokens: int
+    output_tokens: int
+
 
 @dataclass(frozen=True)
 class ProviderUsage:
-    """What we managed to learn. `None` fields mean "could not tell"."""
+    """What we managed to learn. `None` fields mean "could not tell".
+
+    `by_model` is the per-model input/output split used for cost; it is empty when a
+    source can only report a grand total (then cost falls back to a blended rate).
+    """
 
     total_tokens: int | None = None
     rate_limit_percent: float | None = None
+    by_model: tuple[ModelUsage, ...] = ()
 
 
 UNKNOWN = ProviderUsage()
@@ -137,6 +154,57 @@ def incremental_sum(path: Path, cache: Cache, namespace: str, extract: Extract) 
         cache[off_key], cache[total_key], cache[seen_key] = offset, total, seen
 
     return total if seen else None
+
+
+def incremental_fold(path: Path, cache: Cache, namespace: str, fold: Fold) -> dict[str, int] | None:
+    """Like `incremental_sum`, but folds records into an arbitrary integer-state dict
+    and returns that dict, instead of summing one value — for readers that need max or
+    a per-model split, not a single sum. The caller turns the state into its answer.
+
+    Same append-only resume (a byte offset + running state cached across invocations),
+    same rotation reset and oversized-tail guard. Also resets when the resolved path
+    changes, so a "newest match" that rolls to a new session file starts clean rather
+    than resuming an offset from a different file. Returns None only when the file is
+    unreadable or its unread tail is too large to trust — an empty dict means "readable,
+    nothing recognized yet".
+    """
+    off_key, state_key, path_key = (f"{namespace}_{s}" for s in ("offset", "fold", "path"))
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+
+    if cache.get(path_key) != str(path):  # newest-match rolled to a different file
+        cache[path_key], cache[off_key], cache[state_key] = str(path), 0, {}
+
+    offset = as_int(cache.get(off_key)) or 0
+    raw_state = cache.get(state_key)
+    state: dict[str, int] = raw_state if isinstance(raw_state, dict) else {}
+
+    if size < offset:  # truncated/rotated underneath us
+        offset, state = 0, {}
+    if size - offset > MAX_DELTA_BYTES:
+        return None
+
+    if size > offset:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(offset)
+                blob = fh.read(size - offset)
+        except OSError:
+            return None
+        consumed = blob.rfind(b"\n") + 1
+        for raw in blob[:consumed].splitlines():
+            try:
+                record = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                fold(state, record)
+        offset += consumed
+        cache[off_key], cache[state_key] = offset, state
+
+    return state
 
 
 def iter_tail_json_lines(path: Path, max_bytes: int = 1024 * 1024) -> Iterator[dict[str, Any]]:

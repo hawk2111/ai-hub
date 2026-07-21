@@ -7,6 +7,7 @@ from tests.conftest import make_event
 from runbreaker.conditions import (
     CostBudget,
     GateFailures,
+    LoopGuard,
     RateLimitPressure,
     StepBudget,
     TimeBudget,
@@ -95,11 +96,56 @@ def test_cost_budget_disabled_without_a_price_or_ceiling():
 
 
 def test_cost_budget_trips_when_estimated_spend_exceeds_the_ceiling():
-    # 1M tokens @ $15/1M = $15 spend against a $10 ceiling.
+    # Legacy blended fallback: 1M tokens @ $15/1M = $15 against a $10 ceiling.
     cond = CostBudget(max_usd=10, price_per_mtok=15)
     assert cond.evaluate(ctx(tokens=600_000)) is None  # $9 < $10
     trip = cond.evaluate(ctx(tokens=1_000_000))
     assert trip is not None and "15.00" in trip.reason
+
+
+def test_cost_budget_uses_the_central_cost_when_present():
+    """The computed per-model cost (ctx.cost_usd) wins over the legacy blended path."""
+    cond = CostBudget(max_usd=10)
+    assert cond.evaluate(ctx(cost_usd=9.0)) is None
+    trip = cond.evaluate(ctx(cost_usd=11.5))
+    assert trip is not None and "11.50" in trip.reason
+
+
+# -- repeat_loop ------------------------------------------------------------
+
+
+def test_loop_guard_trips_on_identical_calls_in_a_row():
+    cond = LoopGuard(threshold=3)
+    assert cond.evaluate(ctx(recent_tools=("A", "A"))) is None
+    assert cond.evaluate(ctx(recent_tools=("A", "A", "A"))) is not None
+
+
+def test_loop_guard_ignores_progress():
+    """Distinct calls are progress, not a loop — even many of them."""
+    cond = LoopGuard(threshold=3)
+    assert cond.evaluate(ctx(recent_tools=("A", "B", "C", "D", "E"))) is None
+
+
+def test_loop_guard_trips_on_an_a_b_a_b_cycle():
+    cond = LoopGuard(threshold=3)
+    # Two full A-B cycles is not enough; three (six calls) is.
+    assert cond.evaluate(ctx(recent_tools=("A", "B", "A", "B"))) is None
+    trip = cond.evaluate(ctx(recent_tools=("A", "B", "A", "B", "A", "B")))
+    assert trip is not None and "A-B-A-B" in trip.reason
+
+
+def test_loop_guard_only_looks_at_the_tail():
+    """Earlier progress does not excuse a loop that starts later."""
+    cond = LoopGuard(threshold=2)
+    assert cond.evaluate(ctx(recent_tools=("X", "Y", "Z", "A", "A"))) is not None
+
+
+def test_loop_guard_zero_disables():
+    assert LoopGuard(threshold=0).evaluate(ctx(recent_tools=("A",) * 100)) is None
+
+
+def test_loop_guard_only_runs_pre_tool_use():
+    assert LoopGuard.phases == frozenset({EventType.PRE_TOOL_USE})
 
 
 # -- gate_failures ----------------------------------------------------------

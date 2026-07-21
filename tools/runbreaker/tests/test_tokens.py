@@ -7,6 +7,7 @@ Codex reports cumulative totals (take the last one).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,8 @@ from runbreaker.events import EventType
 from runbreaker.tokens import get_source
 from runbreaker.tokens.claude import ClaudeTokenSource
 from runbreaker.tokens.codex import CodexTokenSource
-from runbreaker.tokens.copilot import CopilotTokenSource
+from runbreaker.tokens.copilot import CopilotTokenSource, usage_tokens
+from runbreaker.tokens.vscode import VSCodeTokenSource
 
 
 def write_jsonl(path: Path, records: list[dict]) -> Path:
@@ -153,12 +155,114 @@ def test_copilot_reuses_the_transcript_path_cached_at_stop(tmp_path):
     assert CopilotTokenSource().read(event, cache).total_tokens == 77
 
 
+# -- VS Code ----------------------------------------------------------------
+
+
+def test_vscode_without_a_transcript_is_unknown():
+    """PreToolUse in VS Code carries no transcript_path, so there is nothing to read."""
+    event = make_event(provider="vscode", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens is None
+
+
+def test_vscode_counts_context_as_max_not_sum(tmp_path):
+    """promptTokens is the whole growing context each turn, so it must be maxed, not
+    summed; completionTokens is per-turn output, so it is summed."""
+    path = write_jsonl(
+        tmp_path / "t.jsonl",
+        [
+            {"promptTokens": 100, "completionTokens": 10},
+            {"promptTokens": 300, "completionTokens": 20},  # context grew
+            {"promptTokens": 200},  # a dip; still not additive
+        ],
+    )
+    event = make_event(provider="vscode", transcript_path=str(path), event=EventType.STOP)
+    # max(100,300,200) + (10+20) = 330, NOT 100+300+200+10+20 = 630.
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 330
+
+
+def test_vscode_finds_tokens_nested_at_varying_paths(tmp_path):
+    """Real transcripts bury the counts (v[*].result.metadata, v.metadata, …), so the
+    reader searches each record recursively rather than trusting one shape."""
+    path = write_jsonl(
+        tmp_path / "t.jsonl",
+        [
+            {"v": [{"result": {"metadata": {"promptTokens": 200}}}, {"completionTokens": 15}]},
+            {"v": {"metadata": {"promptTokens": 500}}},
+        ],
+    )
+    event = make_event(provider="vscode", transcript_path=str(path), event=EventType.STOP)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 515  # max(200,500) + 15
+
+
+def test_vscode_single_record_totals_prompt_plus_completion(tmp_path):
+    path = write_jsonl(tmp_path / "t.jsonl", [{"promptTokens": 800, "completionTokens": 400}])
+    event = make_event(provider="vscode", transcript_path=str(path), event=EventType.STOP)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 1200
+
+
+def test_vscode_usage_log_env_points_at_an_explicit_file(tmp_path, monkeypatch):
+    path = write_jsonl(tmp_path / "session.jsonl", [{"promptTokens": 700, "completionTokens": 50}])
+    monkeypatch.setenv("RUNBREAKER_VSCODE_USAGE_LOG", str(path))
+    # No transcript_path on the event — the knob is the only source.
+    event = make_event(provider="vscode", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 750
+
+
+def test_vscode_usage_log_glob_picks_the_newest_file(tmp_path, monkeypatch):
+    old = write_jsonl(tmp_path / "a.jsonl", [{"promptTokens": 100}])
+    new = write_jsonl(tmp_path / "b.jsonl", [{"promptTokens": 900}])
+    os.utime(old, (1, 1))  # force `new` to be the most recently modified
+    os.utime(new, (2, 2))
+    monkeypatch.setenv("RUNBREAKER_VSCODE_USAGE_LOG", str(tmp_path / "*.jsonl"))
+    event = make_event(provider="vscode", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 900
+
+
+def test_vscode_usage_log_prefers_the_file_for_this_session(tmp_path, monkeypatch):
+    """Concurrent VS Code windows: each session must read its own log, not whichever
+    file was written most recently across all of them."""
+    mine = write_jsonl(tmp_path / "sess-A.jsonl", [{"promptTokens": 100}])
+    other = write_jsonl(tmp_path / "sess-B.jsonl", [{"promptTokens": 900}])
+    os.utime(mine, (1, 1))  # mine is OLDER — a newest-match would wrongly pick B
+    os.utime(other, (2, 2))
+    monkeypatch.setenv("RUNBREAKER_VSCODE_USAGE_LOG", str(tmp_path / "*.jsonl"))
+    event = make_event(provider="vscode", session_id="sess-A", event=EventType.PRE_TOOL_USE)
+    assert VSCodeTokenSource().read(event, {}).total_tokens == 100, "its own file, not B's 900"
+
+
+def test_vscode_reader_resets_when_the_newest_file_rolls(tmp_path, monkeypatch):
+    """A cursor cached against session A must not resume into a fresh session B."""
+    a = write_jsonl(tmp_path / "a.jsonl", [{"promptTokens": 100, "completionTokens": 10}])
+    os.utime(a, (1, 1))
+    monkeypatch.setenv("RUNBREAKER_VSCODE_USAGE_LOG", str(tmp_path / "*.jsonl"))
+    event = make_event(provider="vscode", event=EventType.PRE_TOOL_USE)
+    cache: dict = {}
+    assert VSCodeTokenSource().read(event, cache).total_tokens == 110
+    b = write_jsonl(tmp_path / "b.jsonl", [{"promptTokens": 500, "completionTokens": 20}])
+    os.utime(b, (2, 2))
+    # Newest is now b; the reader must report b's numbers, not carry a's offset over.
+    assert VSCodeTokenSource().read(event, cache).total_tokens == 520
+
+
+def test_usage_tokens_recognises_vscode_field_names():
+    assert usage_tokens({"promptTokens": 30, "completionTokens": 12}) == 42
+    assert usage_tokens({"usage": {"promptTokens": 5, "completionTokens": 5}}) == 10
+    assert usage_tokens({"totalTokens": 99}) == 99
+    assert usage_tokens({"nothing": 1}) is None
+
+
 # -- registry ---------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("provider", "expected"),
-    [("claude", "claude"), ("codex", "codex"), ("copilot", "copilot"), ("mystery", "null")],
+    [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("copilot", "copilot"),
+        ("vscode", "vscode"),
+        ("mystery", "null"),
+    ],
 )
 def test_auto_resolves_by_provider(provider, expected):
     assert get_source("auto", provider).id == expected

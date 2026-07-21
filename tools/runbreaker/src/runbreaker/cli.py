@@ -1,6 +1,6 @@
 """`runbreaker` — the human side of the breaker.
 
-    runbreaker status          # breaker + budget, as JSON
+    runbreaker status          # breaker + budget (human-readable; --json for machine)
     runbreaker trip [reason]   # force read-only
     runbreaker reset           # close the breaker, clear the run budget
     runbreaker gc              # drop stale session ledgers
@@ -17,11 +17,12 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from typing import Any
 
 from runbreaker import audit as audit_module
 from runbreaker import config as config_module
 from runbreaker import install as install_module
-from runbreaker.breaker import Breaker
+from runbreaker.breaker import Breaker, BreakerStatus
 from runbreaker.budget import Budget
 from runbreaker.state import Store
 
@@ -33,22 +34,93 @@ def _parts(cfg: config_module.Config) -> tuple[Breaker, Budget]:
     return Breaker(store), Budget(store)
 
 
-def _cmd_status(cfg: config_module.Config, _args: argparse.Namespace) -> int:
+def _cmd_status(cfg: config_module.Config, args: argparse.Namespace) -> int:
     breaker, budget = _parts(cfg)
-    payload = {
-        "breaker": asdict(breaker.status()),
-        "budget": budget.all_sessions(),
-        "home": str(cfg.home),
-        "conditions": [dict(c) for c in cfg.conditions],
-        "gate": {"enabled": cfg.gate.enabled, "checks": [c.name for c in cfg.gate.checks]},
-    }
-    print(json.dumps(payload, indent=2, default=str))
+    status = breaker.status()
+    sessions = budget.all_sessions()
+    if args.json:
+        payload = {
+            "breaker": asdict(status),
+            "budget": sessions,
+            "home": str(cfg.home),
+            "conditions": [dict(c) for c in cfg.conditions],
+            "gate": {"enabled": cfg.gate.enabled, "checks": [c.name for c in cfg.gate.checks]},
+        }
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    for line in _status_lines(cfg, status, sessions):
+        print(line)
     return 0
+
+
+def _status_lines(
+    cfg: config_module.Config, status: BreakerStatus, sessions: dict[str, Any]
+) -> list[str]:
+    """A human-readable status: breaker state first, then limits and per-run budget."""
+    lines: list[str] = []
+    if status.corrupt:
+        lines.append("breaker: OPEN — state file unreadable (treated as open)")
+        lines.append("  reset with: runbreaker reset")
+    elif status.is_open:
+        lines.append(f"breaker: OPEN (read-only) — {status.reason}")
+        if status.tripped_at:
+            lines.append(f"  tripped at {status.tripped_at}")
+        lines.append("  reset with: runbreaker reset")
+    else:
+        line = "breaker: CLOSED (writes enabled)"
+        if status.fails:
+            line += f" — {status.fails} consecutive gate failure(s)"
+        lines.append(line)
+
+    conditions = ", ".join(_fmt_condition(c) for c in cfg.conditions)
+    lines.append(f"conditions: {conditions or 'none'}")
+
+    if cfg.gate.enabled and cfg.gate.checks:
+        lines.append(f"gate: {', '.join(c.name for c in cfg.gate.checks)}")
+    else:
+        lines.append("gate: disabled")
+
+    if not sessions:
+        lines.append("sessions: none tracked yet")
+    else:
+        lines.append(f"sessions ({len(sessions)}):")
+        for sid, data in sessions.items():
+            lines.append(f"  {_short_sid(sid)}: {_fmt_session(data)}")
+    return lines
+
+
+def _fmt_condition(cond: dict[str, Any]) -> str:
+    settings = ", ".join(f"{k}={v}" for k, v in cond.items() if k != "id")
+    return f"{cond.get('id', '?')}({settings})" if settings else str(cond.get("id", "?"))
+
+
+def _short_sid(sid: str) -> str:
+    return sid if len(sid) <= 12 else f"{sid[:8]}…{sid[-3:]}"
+
+
+def _fmt_session(data: dict[str, Any]) -> str:
+    parts = [f"steps={data.get('steps', 0)}"]
+    tokens = data.get("tokens")
+    if tokens is not None:
+        parts.append(f"tokens={tokens}")
+    return ", ".join(parts)
 
 
 def _cmd_trip(cfg: config_module.Config, args: argparse.Namespace) -> int:
     breaker, _budget = _parts(cfg)
     status = breaker.trip(args.reason or "manual trip")
+    # A manual trip is a real breaker event; record it so `report` accounts for it
+    # the same way it does an automatic one (event="trip", decision="open"), marked
+    # as human-initiated via provider="cli" and condition="manual".
+    audit_module.record(
+        cfg.audit_path,
+        event="trip",
+        decision="open",
+        provider="cli",
+        reason=status.reason,
+        detail={"condition": "manual"},
+    )
     print(f"circuit breaker: OPEN (read-only) — {status.reason}")
     return 0
 
@@ -57,7 +129,15 @@ def _cmd_reset(cfg: config_module.Config, _args: argparse.Namespace) -> int:
     breaker, budget = _parts(cfg)
     breaker.reset()
     budget.reset()
-    print("circuit breaker: CLOSED (writes enabled); run budget cleared")
+    # Record the close so the audit trail shows who reopened the door, and when.
+    audit_module.record(
+        cfg.audit_path,
+        event="reset",
+        decision="closed",
+        provider="cli",
+        reason="manual reset",
+    )
+    print("circuit breaker: CLOSED (writes enabled); run budget reset")
     return 0
 
 
@@ -125,7 +205,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="runbreaker", description=__doc__)
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("status", help="show breaker and budget state").set_defaults(fn=_cmd_status)
+    status = sub.add_parser("status", help="show breaker and budget state")
+    status.add_argument("--json", action="store_true", help="machine-readable output")
+    status.set_defaults(fn=_cmd_status)
 
     trip = sub.add_parser("trip", help="force the run read-only")
     trip.add_argument("reason", nargs="?", default="")

@@ -11,12 +11,19 @@ from runbreaker.tokens.claude import ClaudeTokenSource
 from runbreaker.tokens.codex import CodexTokenSource
 from runbreaker.tokens.copilot import CopilotTokenSource
 from runbreaker.tokens.null import NullTokenSource
+from runbreaker.tokens.vscode import VSCodeTokenSource
 
 __all__ = ["UNKNOWN", "Cache", "ProviderUsage", "TokenSource", "get_source"]
 
 _SOURCES: dict[str, type[TokenSource]] = {
     cls.id: cls
-    for cls in (ClaudeTokenSource, CodexTokenSource, CopilotTokenSource, NullTokenSource)
+    for cls in (
+        ClaudeTokenSource,
+        CodexTokenSource,
+        CopilotTokenSource,
+        VSCodeTokenSource,
+        NullTokenSource,
+    )
 }
 
 

@@ -1,26 +1,84 @@
 # runbreaker
 
 A circuit breaker and budget guard for unattended AI coding agents, working across
-**Claude Code**, **OpenAI Codex CLI** and **GitHub Copilot CLI**.
+**Claude Code**, **OpenAI Codex CLI**, **GitHub Copilot CLI**, and **Copilot in VS Code**.
 
-When a run exceeds its step or token budget, or leaves the quality gate red too many
-times in a row, the breaker opens: file mutations are denied, the agent drops to
-read-only, and it surfaces to a human instead of looping on a broken task or burning
-budget. Reads, tests and `runbreaker reset` stay available, so there is no deadlock.
+Leave an agent running on its own and it can loop on a broken task or quietly burn
+hours and money. runbreaker watches the run and, when it crosses a limit you set —
+too many steps, too much wall-clock time, too many tokens or dollars, the same call
+repeated over and over, or a test suite that stays red — it **opens the breaker**:
+file edits are denied, the agent drops to read-only, and the run surfaces to a human
+instead of grinding on. Reads, tests and `runbreaker reset` stay available, so
+nothing deadlocks.
+
+## Quickstart
+
+1. **Install the package** (once per machine):
+
+   ```bash
+   cd tools/runbreaker
+   pip install -e .
+   ```
+
+2. **Wire it into a project** (once per repository, run from the repo root):
+
+   ```bash
+   cd /path/to/your/project
+   runbreaker install
+   ```
+
+   This creates a `.runbreaker/` folder holding `runbreaker.toml` (your config) and a
+   `.py` shim per host, and registers hooks in `.claude/settings.json`,
+   `.codex/hooks.json` and `.github/hooks/runbreaker.json`. Existing configs are
+   merged, never overwritten, so it is safe to re-run.
+
+3. **Check it took:**
+
+   ```bash
+   runbreaker doctor
+   ```
+
+   Every line should read `[ok]`. A `[FAIL]` says exactly what to fix.
+
+4. **Run your agent as usual.** With the defaults, runbreaker only steps in when a run
+   makes more than 250 tool calls or the quality gate stays red — otherwise you will
+   not notice it. Adjust the limits in `.runbreaker/runbreaker.toml` (see
+   [Conditions](#conditions)).
+
+5. **When the breaker opens,** the agent drops to read-only and every write is refused
+   with a message pointing here. See what happened, then reopen the door yourself — a
+   passing test never does it for you:
+
+   ```bash
+   runbreaker status     # what tripped and the active limits (--json for machines)
+   runbreaker report     # a summary of recent trips and denials
+   runbreaker reset      # close the breaker and reset the run budget
+   ```
+
+**Not sure your limits are right?** Start in **warn mode**: runbreaker records what it
+*would* have tripped on, but blocks nothing. Tune, then switch to enforcing.
 
 ```bash
-pip install -e .
-runbreaker install            # wires hooks into all three CLIs, scaffolds runbreaker.toml
-runbreaker doctor             # verify the hooks are actually wired up
-runbreaker status             # breaker + budget, as JSON
-runbreaker report             # summarize the audit trail (trips, denials, give-ups)
-runbreaker trip "investigating"
-runbreaker reset              # closing the breaker is always a human decision
+RUNBREAKER_ENFORCE=warn   # or set [breaker] mode = "warn" in the config
 ```
 
-Install once; run `runbreaker install` in each repository. It generates the hook
-configs and a `.py` shim per (provider, event), and never overwrites a config you
-have already tuned.
+## Concepts
+
+New to the tool? These five words carry the whole model:
+
+- **Run** — one agent session working on a task, identified by a session id. Budgets
+  are counted per run, so each fresh session starts from zero.
+- **Hook** — a small process each host CLI runs *before every tool call* and *when the
+  agent tries to finish*. That is runbreaker's only window to see — and veto — what the
+  agent does.
+- **Condition** — a rule that watches one signal (a budget, a repeated call, a failing
+  test) and decides whether to trip. You choose which conditions run in the config.
+- **Trip / open the breaker** — when a condition fires, the breaker *opens*: file edits
+  are denied and the agent goes read-only until a human runs `runbreaker reset`.
+  Closing it is always a human decision — a passing test never reopens the door.
+- **Quality gate** — commands (usually your tests) that runbreaker runs when the agent
+  tries to finish. A red gate is handed back so the agent fixes its own mess; stay red
+  too often and the breaker opens.
 
 ## How it works
 
@@ -38,10 +96,41 @@ host CLI ──▶ shim ──▶ hook.main ──▶ adapter.parse ──▶ ha
 Adding a fourth CLI is one adapter module. Adding a trip condition is one class —
 including your own, dropped into `.runbreaker/conditions/`.
 
+## Conditions
+
+A condition trips the breaker; the open breaker is what actually denies anything. You
+enable conditions by listing them in `runbreaker.toml`. **Out of the box only
+`step_budget` and `gate_failures` are on** — the rest are opt-in, so add the ones you
+want. Set any threshold to `0` to disable that condition; the first condition to trip
+wins.
+
+| id | Trips when… | Checked | Works on | Key settings (default) |
+|---|---|---|---|---|
+| `step_budget` | the run makes more than `max_steps` tool calls | each call | all | `max_steps` (250) |
+| `time_budget` | the run has run longer than `max_minutes` of wall-clock time | each call + finish | all | `max_minutes` (off) |
+| `token_budget` | token use passes `trip_at_fraction × max_tokens` | each call + finish | Claude, Codex, VS Code ¹ | `max_tokens` (off), `trip_at_fraction` (0.9) |
+| `cost_budget` | estimated spend passes `max_usd` (priced via `[cost]`) | each call + finish | Claude, Codex, VS Code ¹ | `max_usd` (off); rates in `[cost]` |
+| `rate_limit_pressure` | the provider reports more than `max_percent` of its rate limit used | each call + finish | Codex only ¹ | `max_percent` (80) |
+| `repeat_loop` | the same call — or an A-B-A-B cycle — repeats `threshold` times | each call | all | `threshold` (5) |
+| `gate_failures` | the quality gate comes back red `threshold` times in a row | finish | all | `threshold` (3) |
+
+¹ **Abstains** (never trips) when it cannot read the number — an unknown token count is
+never treated as zero. Copilot CLI exposes no usage to hooks, so there only the
+provider-agnostic conditions apply (`step_budget`, `time_budget`, `repeat_loop`,
+`gate_failures`). VS Code can read usage too, but only via an opt-in log — see
+[Provider notes](#provider-notes).
+
+`repeat_loop` matches calls exactly (tool name + a hash of the input), so an ordinary
+edit → test → edit cycle that changes the file each time is *not* a loop and never
+trips — only genuinely identical, stuck repetition does.
+
 ## Configuration
 
 `.runbreaker/runbreaker.toml`, overridden by `RUNBREAKER_*` environment variables so
-a launcher can tighten a per-run ceiling without editing files.
+a launcher can tighten a per-run ceiling without editing files. The block below lists
+**every** condition for reference; the file `runbreaker install` scaffolds turns on
+`step_budget` and `gate_failures` and leaves the rest commented out — uncomment what
+you need.
 
 ```toml
 [budget]
@@ -62,17 +151,30 @@ max_tokens = 2_000_000
 trip_at_fraction = 0.9      # trip with margin — token ledgers are approximate
 
 [[conditions]]
-id = "cost_budget"          # a blended-price layer over token_budget; abstains when tokens unknown
+id = "cost_budget"          # dollar ceiling; prices come from [cost] below
 max_usd = 10
-price_per_mtok = 15         # blended $/1M tokens; coarse by design
 
 [[conditions]]
 id = "rate_limit_pressure"  # Codex only; abstains elsewhere
 max_percent = 80
 
 [[conditions]]
+id = "repeat_loop"          # stuck agent: same call (or A-B-A-B) repeated
+threshold = 5               # 0 disables
+
+[[conditions]]
 id = "gate_failures"
 threshold = 3
+
+# Prices for cost_budget, in USD per million tokens. Per-model input/output rates are
+# exact for token-billed providers (Claude, Codex); default_per_mtok is the blended
+# fallback for other models and for sources that report only a total.
+[cost]
+default_per_mtok = 15
+[[cost.model]]
+id = "claude-opus-4.8"
+input = 5
+output = 25
 
 # Observe without enforcing: conditions and the gate still evaluate and audit what
 # they *would* have done, but nothing is denied or blocked. Tune thresholds first,
@@ -92,10 +194,15 @@ fail_records_breaker = true
 ```
 
 Env: `RUNBREAKER_MAX_STEPS`, `RUNBREAKER_MAX_TOKENS`, `RUNBREAKER_MAX_MINUTES`,
-`RUNBREAKER_MAX_USD`, `RUNBREAKER_BREAKER_THRESHOLD`, `RUNBREAKER_MAX_RATE_PERCENT`,
-`RUNBREAKER_ENFORCE` (`block` / `warn`), `RUNBREAKER_SKIP_BUDGET`,
-`RUNBREAKER_SKIP_GATE`, `RUNBREAKER_HOME`, `RUNBREAKER_PROJECT_DIR`,
-`RUNBREAKER_GC_DAYS`.
+`RUNBREAKER_MAX_USD`, `RUNBREAKER_MAX_REPEATS`, `RUNBREAKER_BREAKER_THRESHOLD`,
+`RUNBREAKER_MAX_RATE_PERCENT`, `RUNBREAKER_ENFORCE` (`block` / `warn`),
+`RUNBREAKER_SKIP_BUDGET`, `RUNBREAKER_SKIP_GATE`, `RUNBREAKER_TOKEN_SOURCE`,
+`RUNBREAKER_RECOMPUTE_EVERY`, `RUNBREAKER_HOME`, `RUNBREAKER_PROJECT_DIR`,
+`RUNBREAKER_GC_DAYS`, `RUNBREAKER_MAX_SESSIONS`, `RUNBREAKER_VSCODE_USAGE_LOG`
+(see [Provider notes](#provider-notes)).
+
+Session ledgers are pruned automatically (by age and count); `runbreaker gc` prunes them
+on demand, and `RUNBREAKER_GC_DAYS` / `RUNBREAKER_MAX_SESSIONS` tune the retention.
 
 ## Design decisions worth knowing
 
@@ -116,6 +223,32 @@ fresh instead.
 
 **A green gate never closes an open breaker.** One passing check is not evidence that
 whatever tripped it is fixed.
+
+**Tokens are counted per run, read from the provider's own transcript.** Each token and
+cost check reads usage for the current session id from the file the provider writes, and
+that number only grows within a run. Claude reports per-request counts, which are
+**summed**; Codex reports a **cumulative** session total, so runbreaker takes the **newest**
+record rather than summing (summing would multiply-count the whole session). VS Code reports
+`promptTokens` as the whole growing context each turn, so it is **maxed** and only
+`completionTokens` is summed (`max(prompt) + sum(completion)`) — summing the context would
+count it over and over.
+
+**Cost is priced per model, from the `[cost]` rate table.** Different models cost
+different amounts, so a single blended rate is unreliable. Where the transcript records
+the model and an input/output split (Claude, Codex), `cost_budget` prices each with that
+model's `input`/`output` rate — `Σ (input × rate_in + output × rate_out)`. A model with
+no configured rate, and any source that reports only a grand total, fall back to
+`default_per_mtok`. It stays an estimate: token ledgers are approximate, and VS Code /
+Copilot bill in **credits** (requests × a per-model multiplier), not per-model tokens —
+their logs carry no cost figure — so there cost is a rough proxy, not an invoice.
+
+**Reset rebases tokens across every session; it does not rewind them.** The breaker is a
+single global switch, so `runbreaker reset` restarts the step, time and loop budgets — for
+*all* tracked sessions — from zero. Tokens are the exception: the provider's transcript
+still holds every token a run spent and a reset cannot rewind that file, so the token and
+cost budgets rebase to the reading captured at reset and count usage *from the reset
+onward*. Without this, a reset would re-read the same cumulative total and re-open the
+breaker on the very next call.
 
 **Warn mode never opens the breaker.** In `mode = "warn"` a condition that trips is
 audited (`decision: "warn"`) but the breaker stays closed, so the gate keeps running
@@ -142,9 +275,9 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
 | | Claude Code | Codex CLI | Copilot CLI | Copilot in VS Code |
 |---|---|---|---|---|
 | config | `.claude/settings.json` | `.codex/hooks.json` | `.github/hooks/runbreaker.json` | reuses the other two |
-| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` | `create` `edit` | `copilot_createFile`, `copilot_applyPatch`, `copilot_replaceString`, … |
-| step budget | yes | yes | yes | yes |
-| token budget | yes | yes | **no** | no |
+| write tools gated | `Write` `Edit` `MultiEdit` `NotebookEdit` | `apply_patch` `Edit` `Write` | `create` `edit` | `create_file`, `apply_patch`, `replace_string_in_file`, … (and legacy `copilot_*`) |
+| step / time / loop / gate | yes | yes | yes | yes |
+| token / cost budget | yes | yes | **no** | opt-in (below) |
 | rate-limit pressure | no | yes | no | no |
 | non-zero exit ≠ 2 | fails open | error | **fails closed** | fails open |
 
@@ -160,13 +293,69 @@ ledger caches a byte offset and a running total. Re-reading a 3.7 MB transcript 
   neither the hook payload nor any documented file
   ([#2947](https://github.com/github/copilot-cli/issues/2947) is open). Hooks are
   registered under PascalCase event names so Copilot emits VS Code-compatible
-  snake_case payloads. Only `step_budget` applies.
+  snake_case payloads. The token and cost budgets abstain; the provider-agnostic
+  conditions (`step_budget`, `time_budget`, `repeat_loop`, `gate_failures`) still apply.
 - **Copilot in VS Code** is a different product with a different tool vocabulary, and
   its `chat.hookFilesLocations` reads `.claude/settings.json` and `.github/hooks/*.json`
   by default — so a shim installed for another host ends up handling VS Code tool calls.
-  Its tool names all start with `copilot_`, which nothing else emits, so they override
-  the baked `--provider` flag. Without that, the breaker would meter a VS Code session
-  and then deny nothing. Agent hooks there are still Preview.
+  runbreaker routes those by tool name, overriding the baked `--provider` flag; without
+  that it would meter a VS Code session and then deny nothing. VS Code is renaming its
+  tools from the legacy `copilot_*` prefix to prefix-less snake_case (`create_file`,
+  `apply_patch`, `replace_string_in_file`, …); runbreaker gates **both** schemes so a
+  rename cannot silently let a write slip past. Agent hooks there are still Preview.
+
+### Which conditions work in VS Code
+
+| condition | works? | why |
+|---|---|---|
+| `step_budget` `time_budget` `repeat_loop` `gate_failures` | **yes** | provider-agnostic — need nothing from the host |
+| `token_budget` `cost_budget` | **opt-in** | need `RUNBREAKER_VSCODE_USAGE_LOG` — see below |
+| `rate_limit_pressure` | **no** | VS Code reports no rate-limit percentage to hooks |
+
+The token and cost conditions are hooked up (`token_source = "auto"` resolves to the
+VS Code reader) but usually **abstain**, because VS Code hands hooks a `transcript_path`
+only on **Stop**, its format is "not a stable hook API", and the one place it records
+real usage (`promptTokens` / `completionTokens`) is the opt-in agent session log
+(`github.copilot.chat.agentDebugLog.fileLogging.enabled`), whose path is never given to
+a hook.
+
+**To turn token/cost budgets on in VS Code:** enable that session logging, then point
+runbreaker at the log with `RUNBREAKER_VSCODE_USAGE_LOG`. It accepts a file, a directory,
+or a glob. A directory/glob resolves to **this session's own log** when it can — VS Code
+names each log by its session id, so several open windows never read each other's usage —
+and otherwise to the most recently modified match, e.g.:
+
+```bash
+export RUNBREAKER_VSCODE_USAGE_LOG="$HOME/.config/Code/User/**/chatSessions/*.jsonl"
+```
+
+The reader counts usage the way VS Code does: `promptTokens` is the whole growing
+context each turn, so it is **maxed** (current context window), while `completionTokens`
+is **summed** (total output) — the total is `max(prompt) + sum(completion)`, not a naive
+sum that would count the context over and over. Cost is therefore approximate (it does
+not model cached vs. new input). Unreadable or unrecognized input still abstains — never
+a guessed number. Without the knob, guard VS Code with the four provider-agnostic
+conditions above.
+
+### vs VS Code's built-in `Chat › Agent: Max Requests`
+
+VS Code already caps the number of model requests **per turn** and prompts you to
+confirm when the cap is hit. It overlaps with `step_budget`, but is narrower on three
+axes, so the two are complementary rather than redundant:
+
+- **Per turn, not per run.** The cap resets every turn, so an agent that makes
+  `maxRequests − 1` requests each turn, turn after turn, never trips it — while burning
+  unbounded time, tokens and cost. runbreaker's step / time / token / cost budgets
+  accumulate across the whole run.
+- **One dimension.** It counts requests only; runbreaker also guards wall-clock time,
+  tokens, dollars, stuck loops and a red quality gate.
+- **Confirm vs. stop.** It asks a human to click "continue" — fine when you are watching,
+  a silent pause when you are not. runbreaker opens a breaker that stays open until an
+  explicit `runbreaker reset`, and is cross-provider.
+
+If you only work in VS Code and only want to bound a single turn, `Max Requests` is
+built in and enough — reach for runbreaker for cumulative run budgets, loop/gate
+guarding, or the same limits across Claude Code and Codex.
 
 ## No shell scripts
 
@@ -215,8 +404,8 @@ interpreter invocation, not a script. On space-free paths the override is absent
 
 **The agent's own shell tool is not blocked.** It cannot be — `runbreaker reset` has to
 stay reachable — so `bash -c 'cat > file'` walks straight past the breaker on every
-host. In VS Code the equivalents are `copilot_runVscodeCommand` and
-`copilot_runNotebookCell`.
+host. In VS Code the equivalents are its terminal and notebook-cell runners (e.g.
+`run_notebook_cell`, and legacy `copilot_runVscodeCommand` / `copilot_runNotebookCell`).
 
 This is a brake against runaway loops and burned budget, from an agent that is not
 trying to escape. It is **not** a security boundary against one that is. For that you
@@ -234,13 +423,17 @@ permission rules — as the destructive-action guard.
 ```bash
 pip install -e '.[dev]'
 pytest
-ruff check src tests tools
+ruff check src tests scripts
 mypy src
-mypy --platform win32 src        # the locking path differs per platform
-python tools/check_stdlib_only.py
+mypy --platform win32 src            # the locking path differs per platform
+python scripts/check_stdlib_only.py
 ```
 
 Hooks have **zero runtime dependencies** and must keep it that way: the host CLI
-spawns them as a bare `python3`, with no venv active. `tools/check_stdlib_only.py`
+spawns them as a bare `python3`, with no venv active. `scripts/check_stdlib_only.py`
 enforces it, and CI runs the suite on Linux and Windows because the locking backend,
 the interpreter path and the shell quoting all differ between them.
+
+## License
+
+MIT.

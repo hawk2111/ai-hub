@@ -9,6 +9,7 @@ import pytest
 from tests.conftest import PYEXE, pre_tool_payload, run_hook
 
 from runbreaker.breaker import Breaker
+from runbreaker.budget import Budget
 from runbreaker.providers import (
     ClaudeAdapter,
     CodexAdapter,
@@ -94,6 +95,25 @@ def test_no_configured_checks_means_the_stop_gate_is_a_noop(project, monkeypatch
     assert code == 0
 
 
+def test_a_repeating_loop_opens_the_breaker(project, state_dir, monkeypatch, capsys):
+    """End-to-end: the same write, over and over, trips the loop guard."""
+    write_config(
+        project,
+        """
+        [[conditions]]
+        id = "repeat_loop"
+        threshold = 3
+        """,
+    )
+    # pre_tool_payload("claude") is the same Write to a.py every call.
+    codes = [
+        run_hook(pre_tool_payload("claude"), "claude", "pre_tool_use", monkeypatch, capsys)[0]
+        for _ in range(4)
+    ]
+    assert 2 in codes, "an identical call repeated past the threshold must be denied"
+    assert Breaker(Store(state_dir)).status().is_open
+
+
 def test_a_red_gate_blocks_the_stop_and_hands_back_the_failure(project, monkeypatch, capsys):
     write_config(
         project,
@@ -152,6 +172,32 @@ def test_a_green_gate_clears_a_stale_failure_count(project, state_dir, monkeypat
     # No checks configured, so this stop is a no-op — and must still clear the count.
     run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
     assert breaker.status().fails == 0
+
+
+def test_an_unwatched_clean_stop_also_clears_the_block_counter(
+    project, state_dir, monkeypatch, capsys
+):
+    """Consistency with the fail counter: a stop that skips the gate (nothing watched
+    changed) must reset stop_blocks too, or stale blocks push a later red gate straight
+    to give-up without a fresh fix-me cycle."""
+    write_config(
+        project,
+        f"""
+        [gate]
+        watch = ["src/**/*.py"]
+
+        [[gate.checks]]
+        name = "passing"
+        command = ["{PYEXE}", "-c", "pass"]
+        """,
+    )
+    budget = Budget(Store(state_dir))
+    budget.bump_stop_blocks("s1")
+    budget.bump_stop_blocks("s1")
+
+    # tmp project is not a git repo, so nothing matches `watch` -> the gate is skipped.
+    run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
+    assert budget.all_sessions().get("s1", {}).get("stop_blocks", 0) == 0
 
 
 def test_an_unlaunchable_check_never_marches_the_breaker_toward_its_threshold(
@@ -231,9 +277,54 @@ def test_vscode_write_tools_are_recognised_through_a_claude_shim(
     assert "circuit breaker is OPEN" in err
 
 
+def test_prefix_less_vscode_write_is_denied_through_a_claude_shim(
+    project, state_dir, monkeypatch, capsys
+):
+    """The rename case, end to end: create_file (no copilot_ prefix) via the Claude
+    shim must still be gated, not silently allowed through as a non-write."""
+    Breaker(Store(state_dir)).trip("test")
+    payload = {
+        "session_id": "s1",
+        "cwd": "/tmp",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "create_file",
+        "tool_input": {"filePath": "a.py"},
+    }
+    code, _, err = run_hook(payload, "claude", "pre_tool_use", monkeypatch, capsys)
+    assert code == 2, "a renamed VS Code write must not slip past the open breaker"
+    assert "circuit breaker is OPEN" in err
+
+
+def test_vscode_token_budget_reads_the_stop_transcript(
+    project, state_dir, tmp_path, monkeypatch, capsys
+):
+    """End to end: provider=vscode resolves the VS Code token source, which reads the
+    Stop transcript's promptTokens/completionTokens — so token_budget can trip."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text('{"promptTokens": 800, "completionTokens": 400}\n', encoding="utf-8")
+    write_config(
+        project,
+        """
+        [[conditions]]
+        id = "token_budget"
+        max_tokens = 1000
+        trip_at_fraction = 0.5
+        """,
+    )
+    payload = {
+        "session_id": "v1",
+        "cwd": "/tmp",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+    }
+    run_hook(payload, "vscode", "stop", monkeypatch, capsys)
+    assert Breaker(Store(state_dir)).status().is_open, "1200 tokens > 500 (0.5*1000) must trip"
+
+
 @pytest.mark.parametrize(
     ("tool", "expected"),
     [
+        # Legacy copilot_* contribution names.
         ("copilot_createFile", True),
         ("copilot_applyPatch", True),
         ("copilot_replaceString", True),
@@ -241,9 +332,17 @@ def test_vscode_write_tools_are_recognised_through_a_claude_shim(
         ("copilot_editNotebook", True),
         ("copilot_readFile", False),
         ("copilot_findFiles", False),
+        # Current prefix-less ToolName-enum names (the copilot_* rename).
+        ("create_file", True),
+        ("apply_patch", True),
+        ("replace_string_in_file", True),
+        ("insert_edit_into_file", True),
+        ("edit_notebook_file", True),
+        ("read_file", False),
         # Escape hatches, gated nowhere — same policy as Bash elsewhere.
         ("copilot_runVscodeCommand", False),
         ("copilot_runNotebookCell", False),
+        ("run_notebook_cell", False),
     ],
 )
 def test_vscode_write_tool_vocabulary(tool, expected):
@@ -261,6 +360,20 @@ def test_codex_specific_fields_identify_codex():
 
 def test_snake_case_without_hints_falls_back_to_claude():
     assert isinstance(detect({"tool_name": "Write"}), ClaudeAdapter)
+
+
+@pytest.mark.parametrize("provider", ["claude", "copilot"])
+@pytest.mark.parametrize("tool", ["create_file", "apply_patch", "replace_string_in_file"])
+def test_prefix_less_vscode_tool_overrides_the_shim_provider(provider, tool):
+    """After the copilot_* rename, a VS Code tool reaching us through a Claude or
+    Copilot shim must still route to the VS Code adapter — or its writes slip past."""
+    payload = {"session_id": "s", "cwd": "/tmp", "tool_name": tool}
+    assert isinstance(detect(payload, provider), VSCodeAdapter)
+
+
+def test_codex_apply_patch_is_not_mistaken_for_vscode():
+    """apply_patch is Codex's tool too; its baked provider keeps it correctly routed."""
+    assert isinstance(detect({"tool_name": "apply_patch"}, "codex"), CodexAdapter)
 
 
 @pytest.mark.parametrize(

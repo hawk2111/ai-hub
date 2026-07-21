@@ -7,6 +7,8 @@ between those two boundaries is provider-agnostic.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -35,6 +37,20 @@ class HookEvent:
     #: Whether `tool_name` mutates files. The adapter decides; handlers stay generic.
     is_write: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def fingerprint(self) -> str:
+        """A stable identity for this tool call: name + a hash of its input.
+
+        Two PreToolUse calls collide iff they invoke the same tool with the same
+        arguments — exactly the repetition a loop guard watches for. The input is
+        hashed so the ledger stays small even when a call carries a whole file.
+        """
+        try:
+            blob = json.dumps(self.tool_input, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            blob = repr(self.tool_input)
+        digest = hashlib.sha1(blob.encode("utf-8", "replace")).hexdigest()[:12]
+        return f"{self.tool_name or ''}:{digest}"
 
 
 Action = Literal["allow", "deny", "block_stop", "noop"]

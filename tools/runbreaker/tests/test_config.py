@@ -119,3 +119,32 @@ def test_time_and_cost_ceilings_come_from_env(project, monkeypatch):
     conditions = {c["id"]: c for c in config.load().conditions}
     assert conditions["time_budget"]["max_minutes"] == 45
     assert conditions["cost_budget"]["max_usd"] == 12.5
+
+
+def test_cost_is_disabled_by_default(project):
+    assert config.load().cost.enabled is False
+
+
+def test_cost_rates_are_parsed(project):
+    write_config(
+        project,
+        """
+        [cost]
+        default_per_mtok = 10
+
+        [[cost.model]]
+        id = "claude-opus-4.8"
+        input = 5
+        output = 25
+        """,
+    )
+    cost = config.load().cost
+    assert cost.enabled
+    assert cost.default_per_mtok == 10
+    assert cost.models["claude-opus-4.8"].input == 5
+    assert cost.models["claude-opus-4.8"].output == 25
+
+
+def test_cost_model_without_rates_is_dropped(project):
+    write_config(project, '[[cost.model]]\nid = "x"\n')  # no input/output
+    assert config.load().cost.models == {}

@@ -1,10 +1,12 @@
 """Wire runbreaker into each host CLI's hook configuration.
 
-Hooks are spawned as a bare `python3`, with no venv active, so the package has to
-be findable without one. `install` resolves the package's absolute location once
-and bakes it into a shim script per (provider, event). A `PYTHONPATH=...` prefix
-inside the command string would work only if the provider runs commands through a
-shell — none of the three promise that.
+Hooks are spawned by the interpreter that ran `install` (`sys.executable`; see
+`interpreter()`), with no venv guaranteed on `sys.path`, so the package has to be
+findable without one. `install` resolves the package's absolute location once and
+bakes it into a shim script per (provider, event). A `PYTHONPATH=...` env-prefix in
+the command string would need a POSIX shell that honors `VAR=val cmd`; Codex and
+Copilot do hand the string to *a* shell, but it may be PowerShell, so none of the
+three can be relied on for that.
 
 Existing config files are merged, never clobbered.
 """
@@ -47,7 +49,8 @@ except BaseException:
     raise SystemExit(0)
 '''
 
-CONFIG_TEMPLATE = """# runbreaker — https://github.com/  (see README.md)
+CONFIG_TEMPLATE = """# runbreaker — https://github.com/hawk2111/ai-hub/tree/main/tools/runbreaker
+# (see README.md)
 # Environment variables (RUNBREAKER_*) override everything here.
 
 [budget]
@@ -73,18 +76,35 @@ threshold = 3
 # id = "time_budget"
 # max_minutes = 45           # 0 disables
 
+# Uncomment to catch a stuck agent repeating itself: the same tool call (or an
+# A-B-A-B cycle) fired threshold times. Matches only identical calls, so ordinary
+# edit/test cycles that make progress never trip.
+# [[conditions]]
+# id = "repeat_loop"
+# threshold = 5              # 0 disables
+
 # Uncomment to bound token spend. Abstains when usage cannot be read (e.g. Copilot).
 # [[conditions]]
 # id = "token_budget"
 # max_tokens = 2_000_000
 # trip_at_fraction = 0.9     # trip with margin — token ledgers are approximate
 
-# Uncomment to bound estimated dollar spend. A blended-price layer over token_budget;
-# coarse by design (one $/1M rate, no input/output split). Abstains on unknown usage.
+# Uncomment to bound estimated dollar spend. Prices live in [cost] below; abstains on
+# unknown usage or when no rate is set — so this (and RUNBREAKER_MAX_USD) does nothing
+# until [cost] is configured. To cap spend without a rate table, use token_budget above.
 # [[conditions]]
 # id = "cost_budget"
 # max_usd = 10
-# price_per_mtok = 15
+
+# Prices for cost_budget, in USD per million tokens. Per-model input/output rates are
+# exact for token-billed providers (Claude, Codex); default_per_mtok is the blended
+# fallback for other models and for sources that report only a total (VS Code/Copilot).
+# [cost]
+# default_per_mtok = 15
+# [[cost.model]]
+# id = "claude-opus-4.8"
+# input = 5
+# output = 25
 
 # Codex reports its own rate-limit usage; abstains on other providers.
 # [[conditions]]
@@ -452,13 +472,15 @@ def install(config: Config, providers: tuple[str, ...]) -> Result:
         notes.extend(_codex_notes())
     if "copilot" in providers:
         notes.append(
-            "copilot: token usage is not exposed to hooks (github/copilot-cli#2947), "
-            "so only `step_budget` applies there."
+            "copilot: token usage is not exposed to hooks (github/copilot-cli#2947), so the "
+            "token and cost conditions abstain there; the provider-agnostic ones "
+            "(step_budget, time_budget, repeat_loop, gate_failures) still apply."
         )
     notes.append(
         "vscode: Copilot agent mode in VS Code reads .claude/settings.json and "
         ".github/hooks/*.json, so it is covered by the files above — no separate install. "
-        "Its `copilot_*` tool names route to the vscode adapter automatically."
+        "Its tool names (legacy copilot_* and the newer prefix-less create_file/apply_patch) "
+        "route to the vscode adapter automatically."
     )
     notes.append(
         "all: runbreaker ships no shell scripts. Claude gets an exec-form hook (no shell "
