@@ -9,6 +9,7 @@ import pytest
 from tests.conftest import PYEXE, pre_tool_payload, run_hook
 
 from runbreaker.breaker import Breaker
+from runbreaker.budget import Budget
 from runbreaker.providers import (
     ClaudeAdapter,
     CodexAdapter,
@@ -171,6 +172,32 @@ def test_a_green_gate_clears_a_stale_failure_count(project, state_dir, monkeypat
     # No checks configured, so this stop is a no-op — and must still clear the count.
     run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
     assert breaker.status().fails == 0
+
+
+def test_an_unwatched_clean_stop_also_clears_the_block_counter(
+    project, state_dir, monkeypatch, capsys
+):
+    """Consistency with the fail counter: a stop that skips the gate (nothing watched
+    changed) must reset stop_blocks too, or stale blocks push a later red gate straight
+    to give-up without a fresh fix-me cycle."""
+    write_config(
+        project,
+        f"""
+        [gate]
+        watch = ["src/**/*.py"]
+
+        [[gate.checks]]
+        name = "passing"
+        command = ["{PYEXE}", "-c", "pass"]
+        """,
+    )
+    budget = Budget(Store(state_dir))
+    budget.bump_stop_blocks("s1")
+    budget.bump_stop_blocks("s1")
+
+    # tmp project is not a git repo, so nothing matches `watch` -> the gate is skipped.
+    run_hook(STOP_PAYLOAD, "claude", "stop", monkeypatch, capsys)
+    assert budget.all_sessions().get("s1", {}).get("stop_blocks", 0) == 0
 
 
 def test_an_unlaunchable_check_never_marches_the_breaker_toward_its_threshold(

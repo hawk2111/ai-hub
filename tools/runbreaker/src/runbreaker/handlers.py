@@ -119,9 +119,12 @@ def stop(event: HookEvent, rt: Runtime) -> Decision:
         return NOOP
 
     if not gate.should_run(rt.config.gate, rt.config.project):
-        # A clean turn clears the counter even when it touched nothing we watch,
-        # so stale failures cannot poison an unrelated later turn.
+        # A clean turn clears the counters even when it touched nothing we watch, so
+        # stale failures cannot poison an unrelated later turn. Both counters reset:
+        # leaving stop_blocks behind would let old blocks push a later red gate
+        # straight to "give up" without a fresh fix-me cycle.
         rt.breaker.record_success()
+        rt.budget.clear_stop_blocks(event.session_id)
         return NOOP
 
     failures = gate.run(rt.config.gate, rt.config.project)
