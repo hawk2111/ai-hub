@@ -54,3 +54,54 @@ def test_report_json_gives_aggregates(project, capsys):
 def test_report_on_an_empty_trail_does_not_crash(project, capsys):
     assert main(["report"]) == 0
     assert "0 audit event(s)" in capsys.readouterr().out
+
+
+def test_status_is_human_readable_by_default(project, capsys):
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "breaker: CLOSED" in out
+    assert "step_budget(max_steps=250)" in out, "active conditions should be listed"
+    assert "sessions: none tracked yet" in out
+
+
+def test_status_reflects_an_open_breaker(project, capsys):
+    main(["trip", "went sideways"])
+    capsys.readouterr()
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "breaker: OPEN" in out
+    assert "went sideways" in out
+    assert "runbreaker reset" in out, "an open breaker should tell the human how to close it"
+
+
+def test_status_json_stays_machine_readable(project, capsys):
+    main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["breaker"]["state"] == "closed"
+    assert "conditions" in payload
+
+
+def test_manual_trip_is_recorded_in_the_audit_trail(project, capsys):
+    cfg = config.load()
+    assert main(["trip", "manual stop"]) == 0
+    capsys.readouterr()
+
+    entries = audit.read(cfg.audit_path)
+    assert [e["event"] for e in entries] == ["trip"]
+    assert entries[0]["decision"] == "open"
+    assert entries[0]["provider"] == "cli"
+    assert entries[0]["reason"] == "manual stop"
+
+    # ...and it surfaces in `report`, so a human sees the same trip they caused.
+    assert main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert "trip/open: 1" in out
+    assert "manual stop" in out
+
+
+def test_manual_reset_is_recorded_in_the_audit_trail(project, capsys):
+    cfg = config.load()
+    main(["reset"])
+    capsys.readouterr()
+    entries = audit.read(cfg.audit_path)
+    assert [(e["event"], e["decision"]) for e in entries] == [("reset", "closed")]
