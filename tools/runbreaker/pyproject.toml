@@ -59,7 +59,7 @@ omit = ["*/__main__.py"]
 
 [tool.coverage.report]
 # A regression floor, not a target. The suite sits well above this; a big drop
-# fails CI. Enforced on Linux only (see ci.yml) to avoid cross-platform variance
+# fails CI. Enforced on Linux only (see runbreaker.yml) to avoid cross-platform variance
 # in the locking backend. Platform-specific branches carry `# pragma: no cover`.
 fail_under = 88
 exclude_also = ["# pragma: no cover", "raise NotImplementedError"]

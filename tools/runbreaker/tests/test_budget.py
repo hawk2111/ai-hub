@@ -116,6 +116,14 @@ def test_compute_cost_unknown_model_uses_the_default_rate():
     assert compute_cost(usage, cfg) == 10.0
 
 
+def test_compute_cost_abstains_on_unpriced_model_without_a_blended_default():
+    # Rates set for opus only, no default_per_mtok: a run on 'sonnet' must read as
+    # unknown, not $0 — otherwise cost_budget would never trip on it.
+    cfg = CostConfig(models={"opus": ModelRate(5, 25)})
+    usage = ProviderUsage(by_model=(ModelUsage("sonnet", 2_000_000, 1_000_000),))
+    assert compute_cost(usage, cfg) is None
+
+
 def test_compute_cost_abstains_when_cost_is_not_configured():
     assert compute_cost(ProviderUsage(total_tokens=10**9), CostConfig()) is None
 

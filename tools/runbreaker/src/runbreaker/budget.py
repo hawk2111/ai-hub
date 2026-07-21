@@ -32,7 +32,10 @@ def compute_cost(usage: ProviderUsage, cost: CostConfig) -> float | None:
 
     Per-model input and output rates are exact where the source split usage by model
     (Claude, Codex); a model without a configured rate — and any source that reports
-    only a grand total — falls back to the blended `default_per_mtok`.
+    only a grand total — falls back to the blended `default_per_mtok`. When a model has
+    no rate *and* there is no positive `default_per_mtok`, we abstain (return None)
+    rather than price it at $0: a silent $0 would let `cost_budget` sail past its
+    ceiling on an unpriced model, the same fail-open the token budget refuses.
     """
     if not cost.enabled:
         return None
@@ -40,6 +43,8 @@ def compute_cost(usage: ProviderUsage, cost: CostConfig) -> float | None:
         total = 0.0
         for m in usage.by_model:
             rate = cost.models.get(m.model)
+            if rate is None and cost.default_per_mtok <= 0:
+                return None  # unpriced model, no blended fallback — unknown, not free
             r_in = rate.input if rate else cost.default_per_mtok
             r_out = rate.output if rate else cost.default_per_mtok
             total += m.input_tokens / 1_000_000 * r_in + m.output_tokens / 1_000_000 * r_out
